@@ -90,16 +90,23 @@ def exportar_accesos_csv(filename: Optional[str] = None):
 
     with open(filename, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["ID", "Timestamp", "Estudiante_ID", "Matricula", "Nombre", "Distancia_Euclidiana", "Estado"])
+        writer.writerow([
+            "ID", "Fecha_Hora_Local", "Estudiante_ID", "Matricula", "Nombre",
+            "Tiempo_Acceso_Segundos", "Distancia_Euclidiana_L2", "Estado_Acceso",
+            "Tipo_Usuario", "Condicion_Iluminacion"
+        ])
         for log in logs:
             writer.writerow([
                 log.id,
                 log.timestamp,
-                log.estudiante_id,
-                log.matricula,
-                log.nombre,
-                log.distancia,
-                log.estado
+                log.estudiante_id or "",
+                log.matricula or "---",
+                log.nombre or "Desconocido",
+                f"{getattr(log, 'tiempo_acceso_segundos', 0.0):.4f}",
+                f"{log.distancia:.4f}",
+                log.estado,
+                getattr(log, 'tipo_usuario', 'estudiante'),
+                getattr(log, 'condicion_luz', 'luz normal')
             ])
 
     print(f"[✓] Reporte exportado exitosamente a: {filename} ({len(logs)} registros)")
@@ -121,10 +128,13 @@ def eliminar_estudiante():
 
     confirm = input(f"¿Confirma eliminar a {est.nombre} ({est.matricula})? (s/n): ").strip().lower()
     if confirm == "s":
-        if db.delete_estudiante(matricula):
+        import getpass
+        admin_user = input("Usuario Administrador: ").strip()
+        admin_pass = getpass.getpass("Contraseña Administrador: ").strip()
+        if db.delete_estudiante(matricula, admin_username=admin_user, admin_password=admin_pass):
             print(f"[✓] Estudiante {est.nombre} y su vector asociado eliminados con éxito.")
         else:
-            print("[-] Error al eliminar el registro.")
+            print("[-] Error al eliminar el registro o credenciales de administrador inválidas.")
     else:
         print("[*] Operación cancelada.")
 

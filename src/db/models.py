@@ -46,6 +46,9 @@ class RegistroAcceso:
     estado: str  # 'PERMITIDO', 'DENEGADO'
     timestamp: Optional[str] = None
     estudiante_id: Optional[int] = None
+    tiempo_acceso_segundos: float = 0.0
+    tipo_usuario: str = "estudiante"
+    condicion_luz: str = "luz normal"
 
 
 @dataclass

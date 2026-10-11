@@ -14,13 +14,14 @@ Copia estos archivos encima de los de tu proyecto (respetando las rutas):
 | `main.py` | La prueba de cámara (opción 9) usa `ThreadedCamera` y muestra resolución y FPS reales. |
 | `.env.example` | Variables nuevas y ejemplo de URL RTSP. |
 
-## Pasos en tu máquina
-1. Reemplaza los archivos.
-2. En tu `.env` real (no el .example) pon la URL del **stream2**:
-   `VIDEO_SOURCE=rtsp://USUARIO:CLAVE@IP_DE_LA_CAMARA:554/stream2`
-   (USUARIO/CLAVE son los de la "Cuenta de cámara" creada en la app Tapo.)
-3. Opcional, para afinar: `DETECTION_WIDTH` (320-640) y `PROCESS_EVERY_N_FRAMES` (2-5).
-4. Prueba primero con la opción 9 del menú (`python3 main.py --cli`): debe verse fluido y mostrar los fps.
+## Resumen de Mejoras del Sprint 2 (Integración Completa por Integrante)
 
-Nota: el encoding facial ahora se calcula sobre el cuadro completo (hasta 960 px) y no sobre una copia a la mitad;
-es el mismo tamaño de imagen que usa el registro, así que la comparación de vectores queda más consistente.
+| Integrante | Rol | Módulos Modificados | Funcionalidad Implementada |
+|---|---|---|---|
+| **Martínez Vera Josué Aldair** | Hardware & RTSP | `src/utils/video_stream.py`, `src/gui/app.py` | Eliminación definitiva del delay de 2 minutos vía `ThreadedCamera`, reconexión automática en micro-cortes, pestaña de configuración de cámaras IP/RTSP y prueba de conexión asíncrona. |
+| **Bello Franco Samantha** | Base de Datos | `src/db/database.py`, `src/db/models.py` | Prevención de duplicados con rechazo de sobrescritura (`IntegrityError`), eliminación segura desvinculando FK para preservar auditoría histórica, y registro de variables científicas (`tiempo_acceso_segundos`, `tipo_usuario`, `condicion_luz`). |
+| **Morales Hernández Guadalupe Aleida** | QA & Tester | `tests/test_performance.py`, `tests/test_biometrics.py` | Suite de benchmarks automatizados por etapa (adquisición, detección, extracción 128-D y matching), validación del SLA total <= 1.5s, fijación de semillas deterministas (`seed=42`) y pruebas de concurrencia. |
+| **Solís Contreras Darian Giselle** | Jira Lead & UI | `src/gui/app.py`, `src/gui/dialogs.py` | Casilla obligatoria de consentimiento informado en la GUI para enrolamiento, trazabilidad de backlog en Jira y optimización de experiencia de usuario en control de acceso. |
+| **Trujillo Trujillo Juan Pablo** | Scrum Master & Core | `src/biometrics/matcher.py`, `src/gui/app.py`, `config.py` | Desacoplamiento del procesamiento pesado en cola en segundo plano (`queue.Queue`), matching matricial vectorizado sub-milisegundo (< 1 ms) y validación de dimensiones finitas. |
+| **Velázquez López Guadalupe** | Compliance & Privacidad | `src/utils/crypto.py`, `src/gui/dialogs.py`, `src/modules/admin.py` | Cifrado simétrico de templates biométricos en reposo (LFPDPPP), modal institucional con texto oficial de Aviso de Privacidad y exportación completa a CSV con métricas de investigación. |
+

@@ -27,6 +27,7 @@ from src.utils.security import (
     encrypt_camera_secret,
     decrypt_camera_secret
 )
+from src.utils.crypto import encrypt_vector_bytes, decrypt_vector_bytes
 
 try:
     import psycopg2
@@ -82,7 +83,7 @@ class Database:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
-            # 2. Tabla de Registro de Accesos (Auditoría de Paso)
+            # 2. Tabla de Registro de Accesos (Auditoría de Paso y Métricas de Investigación)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS registro_accesos (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -91,10 +92,23 @@ class Database:
                     nombre TEXT,
                     distancia REAL,
                     estado TEXT NOT NULL,
+                    tiempo_acceso_segundos REAL DEFAULT 0.0,
+                    tipo_usuario TEXT DEFAULT 'estudiante',
+                    condicion_luz TEXT DEFAULT 'luz normal',
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (estudiante_id) REFERENCES estudiantes(id)
                 )
             """)
+            # Migraciones preventivas para columnas de métricas en bases de datos existentes
+            for col_name, col_type in [
+                ("tiempo_acceso_segundos", "REAL DEFAULT 0.0"),
+                ("tipo_usuario", "TEXT DEFAULT 'estudiante'"),
+                ("condicion_luz", "TEXT DEFAULT 'luz normal'")
+            ]:
+                try:
+                    cursor.execute(f"ALTER TABLE registro_accesos ADD COLUMN {col_name} {col_type};")
+                except Exception:
+                    pass
             # 3. Tabla de Usuarios y Roles (RBAC)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS usuarios (
@@ -157,9 +171,21 @@ class Database:
                         nombre VARCHAR(150),
                         distancia REAL,
                         estado VARCHAR(30) NOT NULL,
+                        tiempo_acceso_segundos REAL DEFAULT 0.0,
+                        tipo_usuario VARCHAR(50) DEFAULT 'estudiante',
+                        condicion_luz VARCHAR(50) DEFAULT 'luz normal',
                         timestamp TIMESTAMPTZ DEFAULT NOW()
                     );
                 """)
+                for col_name, col_type in [
+                    ("tiempo_acceso_segundos", "REAL DEFAULT 0.0"),
+                    ("tipo_usuario", "VARCHAR(50) DEFAULT 'estudiante'"),
+                    ("condicion_luz", "VARCHAR(50) DEFAULT 'luz normal'")
+                ]:
+                    try:
+                        cursor.execute(f"ALTER TABLE registro_accesos ADD COLUMN IF NOT EXISTS {col_name} {col_type};")
+                    except Exception:
+                        pass
                 cursor.execute("""
                     CREATE TABLE IF NOT EXISTS usuarios (
                         id SERIAL PRIMARY KEY,
@@ -201,14 +227,18 @@ class Database:
     # SIEMBRA DE DATOS INICIALES (ADMINISTRADOR Y CÁMARAS)
     # -------------------------------------------------------------------------
     def _seed_default_users(self):
-        """Crea el usuario administrador solicitado si no existen usuarios registrados."""
-        admin_user = "admin#ITSX26"
-        admin_pass = "Admin#2026ITSX"
-        admin_name = "Administrador Principal ITSX"
+        """
+        Crea el usuario administrador y operador iniciales si no existen usuarios registrados.
+        Las credenciales se leen desde el archivo .env (ADMIN_USER / ADMIN_PASS).
+        Si no están definidas en .env se usan los valores predeterminados de primera instalación.
+        """
+        admin_user = os.getenv("ADMIN_USER", "admin#ITSX26")
+        admin_pass = os.getenv("ADMIN_PASS", "Admin#2026ITSX")
+        admin_name = os.getenv("ADMIN_NAME", "Administrador Principal ITSX")
 
-        operador_user = "operador#ITSX26"
-        operador_pass = "Operador#2026ITSX"
-        operador_name = "Operador de Guardia ITSX"
+        operador_user = os.getenv("OPERADOR_USER", "operador#ITSX26")
+        operador_pass = os.getenv("OPERADOR_PASS", "Operador#2026ITSX")
+        operador_name = os.getenv("OPERADOR_NAME", "Operador de Guardia ITSX")
 
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
@@ -224,7 +254,7 @@ class Database:
                                    (%s, %s, %s, 'operador', TRUE);
                         """, (admin_user, h_admin, admin_name, operador_user, h_oper, operador_name))
                         conn.commit()
-                        self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado", "EXITO")
+                        self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde configuración", "EXITO")
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
@@ -239,7 +269,7 @@ class Database:
                                (?, ?, ?, 'operador', 1)
                     """, (admin_user, h_admin, admin_name, operador_user, h_oper, operador_name))
                     conn.commit()
-                    self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado", "EXITO")
+                    self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde configuración", "EXITO")
 
     def _seed_default_cameras(self):
         """Siembra la cámara Tapo C310 inicial o dispositivo local si no hay cámaras configuradas."""
@@ -733,56 +763,60 @@ class Database:
 
     @staticmethod
     def deserialize_vector(data: bytes) -> np.ndarray:
-        """Reconstruye el arreglo NumPy de 128 flotantes desde su representación binaria."""
+        """Reconstruye el arreglo NumPy de 128 flotantes desde su representación binaria (descifra si está cifrado)."""
         if isinstance(data, memoryview):
             data = data.tobytes()
+        if data.startswith(b"ENC1$"):
+            data = decrypt_vector_bytes(data)
         vec = np.frombuffer(data, dtype=np.float64)
         if vec.shape != (128,):
             raise ValueError(f"Formato inválido al deserializar vector: esperado (128,), obtenido {vec.shape}")
         return vec
 
     def save_estudiante(self, matricula: str, nombre: str, carrera: str, embedding: np.ndarray) -> Estudiante:
-        """Guarda un estudiante junto a su template biométrico (sin imagen)."""
-        vector_bytes = self.serialize_vector(embedding)
-        
-        if self.engine == "postgres":
-            with self._get_postgres_connection() as conn:
-                with conn.cursor() as cursor:
+        """
+        Guarda un estudiante junto a su template biométrico (cifrado en reposo según LFPDPPP).
+        Si la matrícula ya existe lanza ValueError (no sobreescribe datos silenciosamente).
+        """
+        raw_bytes = self.serialize_vector(embedding)
+        vector_bytes = encrypt_vector_bytes(raw_bytes) if getattr(config, "ENCRYPT_BIOMETRICS", True) else raw_bytes
+
+        # Verificar duplicado antes de insertar
+        existente = self.get_estudiante_by_matricula(matricula)
+        if existente:
+            raise ValueError(f"La matrícula '{matricula}' ya está registrada en el padrón. Use 'Editar' para modificar datos.")
+
+        try:
+            if self.engine == "postgres":
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO estudiantes (matricula, nombre, carrera, embedding_vector, activo)
+                            VALUES (%s, %s, %s, %s, TRUE)
+                            RETURNING id, created_at;
+                        """, (matricula, nombre, carrera, psycopg2.Binary(vector_bytes)))
+                        res = cursor.fetchone()
+                        conn.commit()
+                        return Estudiante(
+                            id=res[0],
+                            matricula=matricula,
+                            nombre=nombre,
+                            carrera=carrera,
+                            embedding=embedding,
+                            activo=True,
+                            created_at=str(res[1])
+                        )
+            else:
+                with self._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO estudiantes (matricula, nombre, carrera, embedding_vector, activo)
-                        VALUES (%s, %s, %s, %s, TRUE)
-                        ON CONFLICT (matricula) DO UPDATE 
-                        SET nombre = EXCLUDED.nombre,
-                            carrera = EXCLUDED.carrera,
-                            embedding_vector = EXCLUDED.embedding_vector,
-                            activo = TRUE
-                        RETURNING id, created_at;
-                    """, (matricula, nombre, carrera, psycopg2.Binary(vector_bytes)))
-                    res = cursor.fetchone()
+                        VALUES (?, ?, ?, ?, 1)
+                    """, (matricula, nombre, carrera, vector_bytes))
                     conn.commit()
-                    return Estudiante(
-                        id=res[0],
-                        matricula=matricula,
-                        nombre=nombre,
-                        carrera=carrera,
-                        embedding=embedding,
-                        activo=True,
-                        created_at=str(res[1])
-                    )
-        else:
-            with self._get_sqlite_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO estudiantes (matricula, nombre, carrera, embedding_vector, activo)
-                    VALUES (?, ?, ?, ?, 1)
-                    ON CONFLICT(matricula) DO UPDATE 
-                    SET nombre = excluded.nombre,
-                        carrera = excluded.carrera,
-                        embedding_vector = excluded.embedding_vector,
-                        activo = 1;
-                """, (matricula, nombre, carrera, vector_bytes))
-                conn.commit()
-                return self.get_estudiante_by_matricula(matricula)
+                    return self.get_estudiante_by_matricula(matricula)
+        except sqlite3.IntegrityError:
+            raise ValueError(f"La matrícula '{matricula}' ya está registrada. Operación cancelada.")
 
     def update_estudiante(
         self,
@@ -868,27 +902,24 @@ class Database:
         self,
         matricula: str,
         admin_username: Optional[str] = None,
-        admin_password: Optional[str] = None,
-        bypass_auth_for_system: bool = False
+        admin_password: Optional[str] = None
     ) -> bool:
         """
         Elimina un estudiante de la base de datos de forma segura.
         Valida rigurosamente las credenciales de administrador antes de ejecutar la eliminación.
         Preserva la bitácora histórica de accesos desvinculando la clave foránea.
         """
-        operador_nombre = "SISTEMA_LOCAL"
-        if not bypass_auth_for_system:
-            ok_admin, admin_obj, msg = self.verificar_credenciales_admin(admin_username, admin_password)
-            if not ok_admin:
-                self.log_auditoria(
-                    admin_username or "ANONIMO",
-                    "ELIMINAR_ESTUDIANTE",
-                    "ESTUDIANTE",
-                    f"Intento no autorizado de eliminar matrícula {matricula}: {msg}",
-                    "FALLIDO_AUTENTICACION"
-                )
-                return False
-            operador_nombre = admin_obj.username
+        ok_admin, admin_obj, msg = self.verificar_credenciales_admin(admin_username, admin_password)
+        if not ok_admin:
+            self.log_auditoria(
+                admin_username or "ANONIMO",
+                "ELIMINAR_ESTUDIANTE",
+                "ESTUDIANTE",
+                f"Intento no autorizado de eliminar matrícula {matricula}: {msg}",
+                "FALLIDO_AUTENTICACION"
+            )
+            return False
+        operador_nombre = admin_obj.username
 
         est = self.get_estudiante_by_matricula(matricula)
         if not est:
@@ -1008,17 +1039,26 @@ class Database:
         matricula: Optional[str] = None,
         nombre: Optional[str] = None,
         distancia: float = 0.0,
-        estado: str = "PERMITIDO"
+        estado: str = "PERMITIDO",
+        tiempo_acceso_segundos: float = 0.0,
+        tipo_usuario: str = "estudiante",
+        condicion_luz: str = "luz normal"
     ) -> RegistroAcceso:
-        """Registra un evento de acceso en la bitácora de auditoría."""
+        """Registra un evento de acceso en la bitácora de auditoría con métricas científicas."""
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute("""
-                        INSERT INTO registro_accesos (estudiante_id, matricula, nombre, distancia, estado)
-                        VALUES (%s, %s, %s, %s, %s)
+                        INSERT INTO registro_accesos (
+                            estudiante_id, matricula, nombre, distancia, estado,
+                            tiempo_acceso_segundos, tipo_usuario, condicion_luz
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING id, timestamp;
-                    """, (estudiante_id, matricula, nombre, float(distancia), estado))
+                    """, (
+                        estudiante_id, matricula, nombre, float(distancia), estado,
+                        float(tiempo_acceso_segundos), tipo_usuario, condicion_luz
+                    ))
                     res = cursor.fetchone()
                     conn.commit()
                     return RegistroAcceso(
@@ -1028,15 +1068,24 @@ class Database:
                         nombre=nombre,
                         distancia=distancia,
                         estado=estado,
-                        timestamp=str(res[1])
+                        timestamp=str(res[1]),
+                        tiempo_acceso_segundos=float(tiempo_acceso_segundos),
+                        tipo_usuario=tipo_usuario,
+                        condicion_luz=condicion_luz
                     )
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    INSERT INTO registro_accesos (estudiante_id, matricula, nombre, distancia, estado)
-                    VALUES (?, ?, ?, ?, ?);
-                """, (estudiante_id, matricula, nombre, float(distancia), estado))
+                    INSERT INTO registro_accesos (
+                        estudiante_id, matricula, nombre, distancia, estado,
+                        tiempo_acceso_segundos, tipo_usuario, condicion_luz
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                """, (
+                    estudiante_id, matricula, nombre, float(distancia), estado,
+                    float(tiempo_acceso_segundos), tipo_usuario, condicion_luz
+                ))
                 conn.commit()
                 last_id = cursor.lastrowid
                 return RegistroAcceso(
@@ -1046,17 +1095,21 @@ class Database:
                     nombre=nombre,
                     distancia=distancia,
                     estado=estado,
-                    timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    tiempo_acceso_segundos=float(tiempo_acceso_segundos),
+                    tipo_usuario=tipo_usuario,
+                    condicion_luz=condicion_luz
                 )
 
     def get_recent_accesos(self, limit: int = 50) -> List[RegistroAcceso]:
-        """Obtiene los últimos accesos registrados."""
+        """Obtiene los últimos accesos registrados con métricas completas."""
         logs = []
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
                     cursor.execute("""
-                        SELECT id, estudiante_id, matricula, nombre, distancia, estado, timestamp 
+                        SELECT id, estudiante_id, matricula, nombre, distancia, estado, timestamp,
+                               tiempo_acceso_segundos, tipo_usuario, condicion_luz
                         FROM registro_accesos 
                         ORDER BY id DESC LIMIT %s
                     """, (limit,))
@@ -1069,14 +1122,18 @@ class Database:
                                 nombre=row["nombre"],
                                 distancia=float(row["distancia"]),
                                 estado=row["estado"],
-                                timestamp=str(row["timestamp"])
+                                timestamp=str(row["timestamp"]),
+                                tiempo_acceso_segundos=float(row.get("tiempo_acceso_segundos") or 0.0),
+                                tipo_usuario=row.get("tipo_usuario") or "estudiante",
+                                condicion_luz=row.get("condicion_luz") or "luz normal"
                             )
                         )
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT id, estudiante_id, matricula, nombre, distancia, estado, timestamp 
+                    SELECT id, estudiante_id, matricula, nombre, distancia, estado, timestamp,
+                           tiempo_acceso_segundos, tipo_usuario, condicion_luz
                     FROM registro_accesos 
                     ORDER BY id DESC LIMIT ?
                 """, (limit,))
@@ -1089,7 +1146,10 @@ class Database:
                             nombre=row["nombre"],
                             distancia=float(row["distancia"]),
                             estado=row["estado"],
-                            timestamp=str(row["timestamp"])
+                            timestamp=str(row["timestamp"]),
+                            tiempo_acceso_segundos=float(row["tiempo_acceso_segundos"] or 0.0),
+                            tipo_usuario=row["tipo_usuario"] or "estudiante",
+                            condicion_luz=row["condicion_luz"] or "luz normal"
                         )
                     )
         return logs

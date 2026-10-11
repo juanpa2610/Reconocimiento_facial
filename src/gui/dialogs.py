@@ -582,3 +582,112 @@ class CrearUsuarioDialog(tk.Toplevel):
         self.datos = {"nombre": nom, "username": usr, "password": pwd, "rol": rol}
         self.confirmado = True
         self.destroy()
+
+
+class AvisoPrivacidadDialog(tk.Toplevel):
+    """
+    Ventana modal informativa del Aviso de Privacidad Institucional del ITSX.
+    Cumple con los Artículos 3, 7, 8, 13 y 16 de la Ley Federal de Protección
+    de Datos Personales en Posesión de los Particulares (LFPDPPP).
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("ITSX - Aviso de Privacidad Integral (LFPDPPP)")
+        self.geometry("620x540")
+        self.resizable(False, False)
+
+        self.COLOR_BG = "#0B1120"
+        self.COLOR_PANEL = "#151F32"
+        self.COLOR_CARD = "#1E293B"
+        self.COLOR_GOLD_ITSX = "#E5A823"
+        self.COLOR_TEXT = "#F8FAFC"
+        self.COLOR_TEXT_MUTED = "#94A3B8"
+        self.COLOR_GREEN = "#10B981"
+
+        self.configure(bg=self.COLOR_BG)
+        self.transient(parent)
+        self.grab_set()
+
+        self._build_ui()
+        self._center_window(parent)
+
+    def _center_window(self, parent):
+        self.update_idletasks()
+        try:
+            pw, ph, px, py = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
+        except Exception:
+            pw, ph, px, py = 1200, 800, 100, 100
+        w, h = 620, 540
+        x = px + max(0, (pw - w) // 2)
+        y = py + max(0, (ph - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _build_ui(self):
+        main = tk.Frame(self, bg=self.COLOR_BG, padx=22, pady=18)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Frame(main, bg=self.COLOR_BG)
+        header.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(
+            header, text="📜 AVISO DE PRIVACIDAD INTEGRAL Y CONSENTIMIENTO INFORMADO",
+            font=("Helvetica", 11, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG
+        ).pack(anchor=tk.W)
+        tk.Label(
+            header, text="Instituto Tecnológico Superior de Xalapa (ITSX) | Sistema de Control de Acceso",
+            font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_BG
+        ).pack(anchor=tk.W)
+
+        # Contenedor con texto legal deslizable
+        text_frame = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID)
+        text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
+        txt = tk.Text(
+            text_frame, font=("Helvetica", 9), bg=self.COLOR_PANEL, fg=self.COLOR_TEXT,
+            wrap=tk.WORD, yscrollcommand=scrollbar.set, padx=14, pady=12, bd=0
+        )
+        scrollbar.config(command=txt.yview)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        aviso_texto = (
+            "1. IDENTIDAD Y DOMICILIO DEL RESPONSABLE:\n"
+            "El Instituto Tecnológico Superior de Xalapa (ITSX), con domicilio en Sección 5A Reserva Territorial S/N, "
+            "Xalapa, Veracruz, es responsable del tratamiento de los datos biométricos recabados.\n\n"
+            "2. DATOS PERSONALES SENSIBLES TRATADOS:\n"
+            "En apego al Artículo 3, fracción VI de la LFPDPPP, se tratan datos biométricos consistentes en la "
+            "geometría facial para fines de identificación y control de acceso institucional.\n\n"
+            "3. PRINCIPIO DE MINIMIZACIÓN Y NO ALMACENAMIENTO DE IMÁGENES:\n"
+            "• El sistema NO almacena fotografías, videos ni archivos gráficos de rostros en disco ni base de datos.\n"
+            "• Los fotogramas de captura residen temporalmente en la memoria RAM y son inmediatamente destruidos "
+            "tras la extracción matemática.\n"
+            "• La biometría se almacena exclusivamente como una proyección vectorial matemática unidireccional "
+            "de 128 valores flotantes (1024 bytes), matemáticamente irreversible: a partir de ella resulta "
+            "técnicamente imposible reconstruir la imagen facial original.\n\n"
+            "4. SEGURIDAD Y CIFRADO EN REPOSO:\n"
+            "En cumplimiento del Artículo 13 de la LFPDPPP, los vectores biométricos son resguardados bajo cifrado "
+            "simétrico autenticado (CTR-SHA256 con firma HMAC), impidiendo su lectura o aprovechamiento en caso de "
+            "extracción física no autorizada de la base de datos.\n\n"
+            "5. FINALIDADES DEL TRATAMIENTO:\n"
+            "• Control seguro del flujo de entrada y salida al campus institucional.\n"
+            "• Prevención de suplantación de identidad en instalaciones del ITSX.\n"
+            "• Generación de estadísticas de aforo y tiempos de acceso sin divulgación de identidades.\n\n"
+            "6. EJERCICIO DE DERECHOS ARCO:\n"
+            "El titular o su representante legal pueden solicitar en cualquier momento el Acceso, Rectificación, "
+            "Cancelación u Oposición (Derechos ARCO) respecto a su registro biométrico, lo cual implicará el borrado "
+            "permanente de su vector en el padrón institucional."
+        )
+        txt.insert("1.0", aviso_texto)
+        txt.config(state=tk.DISABLED)
+
+        btn_box = tk.Frame(main, bg=self.COLOR_BG)
+        btn_box.pack(fill=tk.X)
+
+        tk.Button(
+            btn_box, text="Entendido y Cerrar", font=("Helvetica", 10, "bold"),
+            bg=self.COLOR_GOLD_ITSX, fg="#000000", relief=tk.FLAT, padx=18, pady=7,
+            cursor="hand2", command=self.destroy
+        ).pack(side=tk.RIGHT)
+

@@ -99,3 +99,9 @@ CONSECUTIVE_FRAMES_BLINK = int(os.getenv("CONSECUTIVE_FRAMES_BLINK", "2"))
 # Cantidad mínima de parpadeos requeridos para validar sujeto vivo
 REQUIRED_BLINKS = int(os.getenv("REQUIRED_BLINKS", "1"))
 
+# -----------------------------------------------------------------------------
+# Criptografía y Protección en Reposo (LFPDPPP)
+# -----------------------------------------------------------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "ITSX-BIOMETRIC-SECURITY-KEY-2026")
+ENCRYPT_BIOMETRICS = os.getenv("ENCRYPT_BIOMETRICS", "true").lower() in ("true", "1", "yes")
+
