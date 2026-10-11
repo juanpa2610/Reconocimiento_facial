@@ -10,6 +10,18 @@ from pathlib import Path
 # Configurar directorio temporal de caché para matplotlib y mediapipe
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_cache")
 
+# Opciones de FFmpeg para streams RTSP (cámaras IP como la Tapo C310) con la menor latencia posible.
+# IMPORTANTE: deben estar definidas ANTES de la primera llamada a cv2.VideoCapture.
+#   - rtsp_transport;tcp  -> evita pérdida de paquetes por Wi-Fi (menos artefactos / saltos)
+#   - fflags;nobuffer     -> FFmpeg no acumula cuadros en su búfer interno de entrada
+#   - flags;low_delay     -> decodificación de baja latencia
+# Si en tu red prefieres UDP, pon RTSP_TRANSPORT=udp en el .env
+_RTSP_TRANSPORT = os.getenv("RTSP_TRANSPORT", "tcp").lower()
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+    f"rtsp_transport;{_RTSP_TRANSPORT}|fflags;nobuffer|flags;low_delay"
+)
+
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env si existe
@@ -53,3 +65,37 @@ DETECTION_MODEL = os.getenv("DETECTION_MODEL", "hog")
 
 # Habilitar Malla Facial (MediaPipe 468 landmarks) en tiempo real
 ENABLE_FACE_MESH = os.getenv("ENABLE_FACE_MESH", "true").lower() in ("true", "1", "yes")
+
+# -----------------------------------------------------------------------------
+# Rendimiento / baja latencia
+# -----------------------------------------------------------------------------
+# Ancho máximo (px) al que se reduce cada cuadro DENTRO del hilo lector de la cámara.
+# La Tapo C310 en 'stream1' envía ~2304x1296; procesarlo completo en CPU es inviable.
+# 0 = no redimensionar. Recomendado: 960.
+CAMERA_MAX_WIDTH = int(os.getenv("CAMERA_MAX_WIDTH", "960"))
+
+# Ancho (px) de la imagen que se le entrega al detector HOG. Menor = más rápido,
+# pero detecta peor rostros lejanos. Recomendado: 400-640.
+DETECTION_WIDTH = int(os.getenv("DETECTION_WIDTH", "480"))
+
+# Se ejecuta detección + encoding solo 1 de cada N cuadros (los demás reutilizan el resultado).
+PROCESS_EVERY_N_FRAMES = max(1, int(os.getenv("PROCESS_EVERY_N_FRAMES", "3")))
+
+# Segundos sin recibir cuadros tras los cuales se reconecta automáticamente (cámaras IP/Wi-Fi).
+CAMERA_RECONNECT_SECONDS = float(os.getenv("CAMERA_RECONNECT_SECONDS", "3.0"))
+
+# -----------------------------------------------------------------------------
+# Anti-suplantación / Liveness (Detección de parpadeo con Eye Aspect Ratio - EAR)
+# -----------------------------------------------------------------------------
+# Habilita o deshabilita la verificación activa de parpadeo humano para prevenir fotos estáticas
+ENABLE_LIVENESS_CHECK = os.getenv("ENABLE_LIVENESS_CHECK", "false").lower() in ("true", "1", "yes")
+
+# Umbral del Eye Aspect Ratio (EAR): por debajo de este valor se considera ojo cerrado
+EAR_THRESHOLD = float(os.getenv("EAR_THRESHOLD", "0.22"))
+
+# Fotogramas consecutivos requeridos con ojo cerrado para registrar un parpadeo
+CONSECUTIVE_FRAMES_BLINK = int(os.getenv("CONSECUTIVE_FRAMES_BLINK", "2"))
+
+# Cantidad mínima de parpadeos requeridos para validar sujeto vivo
+REQUIRED_BLINKS = int(os.getenv("REQUIRED_BLINKS", "1"))
+

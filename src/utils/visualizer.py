@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import time
 from typing import Tuple, Optional, Any
+import config
 
 try:
     import mediapipe as mp
@@ -185,7 +186,7 @@ class Visualizer:
         else:
             titulo = "ACCESO DENEGADO"
             sub1 = "Sujeto no registrado en la base de datos"
-            sub2 = f"Distancia minima obtenida: {distancia:.2f} > 0.55"
+            sub2 = f"Distancia minima obtenida: {distancia:.2f} > {config.FACE_DISTANCE_THRESHOLD:.2f}"
 
         cv2.putText(
             frame, titulo, (x1 + 25, y1 + 30),

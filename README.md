@@ -113,26 +113,27 @@ Proyecto/
 Ejecute el menú interactivo principal:
 
 ```bash
-cd "/home/juanpa26/Descargas/Taller de investigacion II/Proyecto"
+# Navegar a la carpeta del proyecto
+cd Reconocimiento_facial2
 source .venv/bin/activate
 python3 main.py
 ```
 
 ### Opciones Disponibles:
 1. **[Paso A] Registrar nuevo estudiante:** Abre la cámara en modo espejo con la **malla facial de 468 puntos**. Valida que la matrícula no exista previamente. Al presionar **[ESPACIO]**, realiza la **validación biométrica preventiva** contra la base de datos; si el rostro ya pertenece a otra persona, detiene el registro. Si es válido, guarda el vector de 1024 bytes y destruye la imagen de la memoria.
-2. **[Paso B] Control de acceso en vivo:** Reconocimiento continuo con tarjeta flotante estable (Verde: AUTORIZADO, Rojo: DENEGADO) con temporizador visual para evitar parpadeos.
+2. **[Paso B] Control de acceso en vivo:** Reconocimiento continuo con tarjeta flotante estable (Verde: AUTORIZADO, Rojo: DENEGADO) con temporizador visual para evitar parpadeos y matriz de matching en caché de memoria RAM.
 3. **Listar estudiantes:** Muestra los IDs, matrículas y vectores almacenados.
 4. **Consultar bitácora:** Historial de accesos con distancias euclidianas registradas.
 5. **Exportar CSV:** Genera un archivo CSV con toda la auditoría.
 6. **Eliminar estudiante:** Da de baja a un alumno y borra su vector asociado.
 7. **Ver informe técnico:** Métricas de investigación sobre LFPDPPP y ahorro en disco.
-8. **Probar cámara:** Verificación rápida de video en `/dev/video0`.
+8. **Probar cámara:** Verificación rápida de video en `/dev/video0` o cámara RTSP Tapo C310.
 
 ---
 
 ## 6. Pruebas Automatizadas
 
-Para validar matemáticamente el sistema y el filtro de duplicados:
+Para validar matemáticamente el sistema, el filtro de duplicados, el caché vectorial y el detector de vitalidad (Liveness):
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -141,18 +142,22 @@ python3 -m unittest discover -s tests -v
 Resultado:
 ```text
 test_access_audit_log ... ok
+test_cached_matrix_matcher ... ok
 test_database_persistence_without_images ... ok
 test_duplicate_matricula_detection ... ok
 test_euclidean_distance_and_matching ... ok
 test_invalid_vector_dimensions_raise_error ... ok
+test_liveness_ear_and_blink ... ok
 test_preventive_biometric_duplicate_detection ... ok
 test_vector_serialization_dimensions ... ok
+test_verificar_rostro_previo_function ... ok
 
 ----------------------------------------------------------------------
-Ran 7 tests in 0.105s
+Ran 10 tests in 0.735s
 
 OK
 ```
+
 
 ---
 

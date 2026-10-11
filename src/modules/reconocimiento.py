@@ -20,7 +20,9 @@ import config
 from src.db.database import Database
 from src.biometrics.encoder import FaceEncoder
 from src.biometrics.matcher import FaceMatcher, MatchResult
+from src.biometrics.liveness import BlinkLivenessDetector
 from src.utils.visualizer import Visualizer
+from src.utils.video_stream import ThreadedCamera
 
 
 class AccessVisualState:
@@ -66,7 +68,8 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
     print("[*] Cargando plantillas biométricas desde la base de datos...")
 
     estudiantes = db.get_all_active_estudiantes()
-    print(f"[+] Plantillas cargadas en memoria: {len(estudiantes)} estudiante(s) activo(s).")
+    matcher.set_known_students(estudiantes)
+    print(f"[+] Plantillas cargadas en memoria y cacheadas: {len(estudiantes)} estudiante(s) activo(s).")
     print(f"[*] Umbral de decisión euclidiana (L2): <= {matcher.threshold:.2f}")
 
     if len(estudiantes) == 0:
@@ -75,9 +78,9 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
         print("    Registre alumnos usando el Módulo de Registro (Opción 1).")
 
     print(f"\n[*] Abriendo flujo de video: {video_source} ...")
-    cap = cv2.VideoCapture(video_source)
-
-    if not cap.isOpened():
+    # Lector en hilo aparte: siempre entrega el cuadro MÁS RECIENTE (sin delay acumulado)
+    cap = ThreadedCamera(video_source)
+    if not cap.start():
         print(f"[-] Error: No se pudo abrir la fuente de video ({video_source}).")
         return
 
@@ -91,7 +94,7 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
 
     frame_count = 0
-    process_every_n_frames = 2
+    process_every_n_frames = config.PROCESS_EVERY_N_FRAMES
     cached_face_locations = []
     cached_match_results = []
 
@@ -105,12 +108,14 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
 
     try:
         while cap.isOpened():
-            ret, frame = cap.read()
+            ret, frame = cap.read(timeout=5.0)
             if not ret:
-                print("[-] Fin o interrupción de la transmisión de video.")
-                break
+                if not cap.isOpened():
+                    print("[-] Fin o interrupción de la transmisión de video.")
+                    break
+                continue  # aún no llega cuadro nuevo (o se está reconectando)
 
-            # Medición de FPS
+            # Medición de FPS de visualización
             fps_counter += 1
             if time.time() - fps_start_time >= 1.0:
                 current_fps = fps_counter / (time.time() - fps_start_time)
@@ -121,24 +126,21 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
 
             # Procesar detección facial cada N cuadros para mantener alta tasa de FPS en CPU
             if frame_count % process_every_n_frames == 0:
-                small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-                rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-
-                small_locations = encoder.detect_face_locations(rgb_small_frame)
-                encodings = encoder.extract_encodings(rgb_small_frame, small_locations)
+                # Detección sobre copia reducida (rápido); encoding sobre el cuadro completo (mejor vector)
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                face_boxes = encoder.detect_face_locations_scaled(rgb_frame, config.DETECTION_WIDTH)
+                encodings = encoder.extract_encodings(rgb_frame, face_boxes)
 
                 cached_face_locations = []
                 cached_match_results = []
                 ahora = time.time()
 
-                for small_box, encoding in zip(small_locations, encodings):
-                    # Reescalar coordenadas a tamaño nativo (x2)
-                    top, right, bottom, left = small_box
-                    box = (top * 2, right * 2, bottom * 2, left * 2)
+                for box, encoding in zip(face_boxes, encodings):
+                    # Las cajas ya vienen en coordenadas del cuadro original
                     cached_face_locations.append(box)
 
-                    # Búsqueda vectorial ultrarrápida en memoria RAM
-                    match_result = matcher.match(encoding, estudiantes)
+                    # Búsqueda vectorial ultrarrápida contra matriz precargada en caché
+                    match_result = matcher.match_candidate(encoding)
                     cached_match_results.append(match_result)
 
                     if match_result.reconocido and match_result.estudiante:
@@ -220,7 +222,7 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
                 )
 
             # Barra de estado superior con métricas
-            header_text = f"CONTROL DE ACCESO | Templates: {len(estudiantes)} | Umbral L2: {matcher.threshold:.2f} | FPS: {current_fps:.1f}"
+            header_text = f"CONTROL DE ACCESO | Templates: {len(estudiantes)} | Umbral L2: {matcher.threshold:.2f} | FPS: {current_fps:.1f} (cam: {cap.fps:.0f})"
             Visualizer.draw_banner(frame, header_text, color=Visualizer.COLOR_INFO, position="top")
 
             # Barra inferior
@@ -235,7 +237,8 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
             elif key == ord('r') or key == ord('R'):
                 print("\n[*] Recargando plantillas desde la base de datos...")
                 estudiantes = db.get_all_active_estudiantes()
-                print(f"[+] Plantillas actualizadas: {len(estudiantes)} estudiante(s) activo(s).\n")
+                matcher.set_known_students(estudiantes)
+                print(f"[+] Plantillas actualizadas en caché: {len(estudiantes)} estudiante(s) activo(s).\n")
 
     finally:
         cap.release()

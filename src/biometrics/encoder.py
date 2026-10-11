@@ -35,6 +35,28 @@ class FaceEncoder:
         """
         return face_recognition.face_locations(frame_rgb, model=self.model)
 
+    def detect_face_locations_scaled(
+        self,
+        frame_rgb: np.ndarray,
+        target_width: int = config.DETECTION_WIDTH
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Detecta rostros sobre una copia REDUCIDA del cuadro (más rápido) y devuelve las cajas
+        (top, right, bottom, left) ya reescaladas a las coordenadas del cuadro ORIGINAL.
+        El encoding se puede calcular después sobre el cuadro original (mejor calidad del vector).
+        """
+        h, w = frame_rgb.shape[:2]
+        if not target_width or w <= target_width:
+            return self.detect_face_locations(frame_rgb)
+
+        scale = w / target_width
+        small = cv2.resize(frame_rgb, (target_width, max(1, int(h / scale))), interpolation=cv2.INTER_AREA)
+        boxes = self.detect_face_locations(small)
+        return [
+            (int(t * scale), int(r * scale), int(b * scale), int(l * scale))
+            for (t, r, b, l) in boxes
+        ]
+
     def extract_encodings(
         self,
         frame_rgb: np.ndarray,

@@ -26,6 +26,7 @@ from src.db.models import Estudiante
 from src.biometrics.encoder import FaceEncoder
 from src.biometrics.matcher import FaceMatcher
 from src.utils.visualizer import Visualizer
+from src.utils.video_stream import ThreadedCamera
 
 try:
     import mediapipe as mp
@@ -82,9 +83,9 @@ def registrar_estudiante_en_vivo(
     matcher = FaceMatcher(threshold=config.FACE_DISTANCE_THRESHOLD)
 
     print(f"\n[*] Conectando con la cámara ({video_source}) ...")
-    cap = cv2.VideoCapture(video_source)
-
-    if not cap.isOpened():
+    # Lector en hilo aparte: siempre entrega el cuadro MÁS RECIENTE (sin delay acumulado)
+    cap = ThreadedCamera(video_source)
+    if not cap.start():
         print(f"[-] Error: No se pudo abrir la cámara en '{video_source}'.")
         return False
 
@@ -112,10 +113,12 @@ def registrar_estudiante_en_vivo(
 
     try:
         while cap.isOpened():
-            ret, frame = cap.read()
+            ret, frame = cap.read(timeout=5.0)
             if not ret:
-                print("[-] Error al leer de la cámara.")
-                break
+                if not cap.isOpened():
+                    print("[-] Error al leer de la cámara.")
+                    break
+                continue  # aún no llega cuadro nuevo (o se está reconectando)
 
             frame = cv2.flip(frame, 1)
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -130,7 +133,11 @@ def registrar_estudiante_en_vivo(
                     face_landmarks = mesh_results.multi_face_landmarks[0]
                     Visualizer.draw_face_mesh(frame, face_landmarks)
             else:
-                landmarks_list = face_recognition.face_landmarks(rgb_frame)
+                fb_boxes = encoder.detect_face_locations_scaled(rgb_frame, config.DETECTION_WIDTH)
+                landmarks_list = (
+                    face_recognition.face_landmarks(rgb_frame, face_locations=fb_boxes)
+                    if len(fb_boxes) == 1 else []
+                )
                 if len(landmarks_list) == 1:
                     mesh_detected = True
                     Visualizer.draw_facial_landmarks(frame, landmarks_list[0])
@@ -160,7 +167,7 @@ def registrar_estudiante_en_vivo(
 
             if (key == 32 or key == 13) and mesh_detected:
                 print("\n[*] Extrayendo vector biométrico del rostro...")
-                boxes = encoder.detect_face_locations(rgb_frame)
+                boxes = encoder.detect_face_locations_scaled(rgb_frame, max(config.DETECTION_WIDTH, 640))
 
                 if len(boxes) != 1:
                     print("[-] Error: Debe haber exactamente un solo rostro en el encuadre.")
@@ -211,8 +218,8 @@ def registrar_estudiante_en_vivo(
             face_mesh.close()
         cap.release()
         cv2.destroyAllWindows()
-        del frame
-        del rgb_frame
+        frame = None
+        rgb_frame = None
         gc.collect()
 
     if rostro_ya_existente:

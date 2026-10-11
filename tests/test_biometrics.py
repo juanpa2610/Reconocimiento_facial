@@ -12,11 +12,13 @@ import tempfile
 from src.db.database import Database
 from src.db.models import Estudiante
 from src.biometrics.matcher import FaceMatcher
+from src.biometrics.liveness import BlinkLivenessDetector, eye_aspect_ratio
 
 
 class TestBiometricSystem(unittest.TestCase):
 
     def setUp(self):
+        np.random.seed(42)  # Semilla fija para reproducibilidad y estabilidad estadística
         # Base de datos temporal para pruebas unitarias aisladas
         self.temp_db = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
         self.db_path = self.temp_db.name
@@ -26,6 +28,7 @@ class TestBiometricSystem(unittest.TestCase):
         self.db.engine = "sqlite"
         self.db.sqlite_path = self.db_path
         self.db.init_db()
+
 
     def tearDown(self):
         if os.path.exists(self.db_path):
@@ -175,6 +178,74 @@ class TestBiometricSystem(unittest.TestCase):
         self.assertIsNone(est_nuevo)
         self.assertGreater(dist_nuevo, 0.55)
 
+    def test_cached_matrix_matcher(self):
+        """Verifica la optimización de caché de la matriz (N, 128) y medición de tiempo en sub-milisegundo."""
+        matcher = FaceMatcher(threshold=0.55)
+
+        # Generar 20 estudiantes sintéticos con vectores unitarios
+        alumnos = []
+        for i in range(20):
+            v = np.random.randn(128).astype(np.float64)
+            v /= np.linalg.norm(v)
+            alumnos.append(Estudiante(id=i+1, matricula=f"MAT-{i:03d}", nombre=f"Alumno {i}", carrera="ISC", embedding=v))
+
+        # Precargar matriz en caché
+        matcher.set_known_students(alumnos)
+        self.assertEqual(matcher._cached_matrix.shape, (20, 128))
+
+        # Candidato idéntico al alumno #7
+        candidato = alumnos[7].embedding
+        res, t_ms = matcher.match_with_timing(candidato)
+
+        self.assertTrue(res.reconocido)
+        self.assertEqual(res.estudiante.matricula, "MAT-007")
+        self.assertAlmostEqual(res.distancia, 0.0, places=4)
+        # La comparación vectorizada contra 20 identidades debe tomar menos de 5 milisegundos
+        self.assertLess(t_ms, 5.0, f"El tiempo de matching fue {t_ms} ms, debería ser < 5 ms")
+
+    def test_liveness_ear_and_blink(self):
+        """Verifica el cálculo del Eye Aspect Ratio (EAR) y la detección de parpadeo humano."""
+        # Definir 6 puntos de un ojo abierto: [p1, p2, p3, p4, p5, p6]
+        # p1=(0,0), p4=(10,0) -> ancho horizontal = 10
+        # p2=(3,3), p6=(3,-3) -> altura vertical 1 = 6
+        # p3=(7,3), p5=(7,-3) -> altura vertical 2 = 6
+        # EAR = (6 + 6) / (2 * 10) = 12 / 20 = 0.60
+        open_eye = [(0.0, 0.0), (3.0, 3.0), (7.0, 3.0), (10.0, 0.0), (7.0, -3.0), (3.0, -3.0)]
+        ear_open = eye_aspect_ratio(open_eye)
+        self.assertGreater(ear_open, 0.25, "Ojo abierto debe tener EAR alto")
+
+        # Ojo cerrado (altura vertical reducida a 1):
+        # p2=(3, 0.5), p6=(3, -0.5) -> altura = 1.0
+        # p3=(7, 0.5), p5=(7, -0.5) -> altura = 1.0
+        # EAR = (1 + 1) / (2 * 10) = 0.10
+        closed_eye = [(0.0, 0.0), (3.0, 0.5), (7.0, 0.5), (10.0, 0.0), (7.0, -0.5), (3.0, -0.5)]
+        ear_closed = eye_aspect_ratio(closed_eye)
+        self.assertLess(ear_closed, 0.15, "Ojo cerrado debe tener EAR bajo (< 0.15)")
+
+        # Probar detector de parpadeo
+        detector = BlinkLivenessDetector(ear_threshold=0.22, consec_frames=2, required_blinks=1)
+
+        landmarks_abierto = {"left_eye": open_eye, "right_eye": open_eye}
+        landmarks_cerrado = {"left_eye": closed_eye, "right_eye": closed_eye}
+
+        # Estado inicial
+        self.assertFalse(detector.is_live)
+
+        # 3 cuadros de ojos abiertos -> sigue sin confirmar parpadeo
+        for _ in range(3):
+            detector.update(landmarks_abierto)
+        self.assertFalse(detector.is_live)
+
+        # 2 cuadros de ojos cerrados -> parpadeo en curso
+        detector.update(landmarks_cerrado)
+        detector.update(landmarks_cerrado)
+
+        # Se vuelve a abrir el ojo -> parpadeo completado, vitalidad confirmada
+        is_live, _, blinks = detector.update(landmarks_abierto)
+        self.assertTrue(is_live, "Debe confirmar que el sujeto está vivo tras completar el parpadeo")
+        self.assertEqual(blinks, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+

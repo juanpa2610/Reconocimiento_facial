@@ -33,6 +33,7 @@ try:
         generar_informe_metodologico
     )
     from src.gui import iniciar_gui
+    from src.utils.video_stream import ThreadedCamera
 except ImportError as e:
     print(f"\n[-] Error al importar dependencias: {e}")
     print("    Por favor activa el entorno virtual ejecutando:")
@@ -44,8 +45,8 @@ except ImportError as e:
 def probar_camara():
     """Prueba rápida del dispositivo de captura de video."""
     print(f"\n[*] Probando fuente de video: {config.VIDEO_SOURCE} ...")
-    cap = cv2.VideoCapture(config.VIDEO_SOURCE)
-    if not cap.isOpened():
+    cap = ThreadedCamera(config.VIDEO_SOURCE)
+    if not cap.start():
         print(f"[-] ERROR: No se puede acceder a la cámara en '{config.VIDEO_SOURCE}'.")
         print("    Asegúrate de que la cámara esté conectada o ajusta VIDEO_SOURCE en .env")
         return
@@ -53,12 +54,14 @@ def probar_camara():
     print("[+] Cámara detectada exitosamente.")
     print("[*] Abriendo ventana de prueba. Presione 'Q' para cerrarla...")
     while True:
-        ret, frame = cap.read()
+        ret, frame = cap.read(timeout=5.0)
         if not ret:
-            print("[-] No se pudo leer el cuadro de la cámara.")
-            break
+            if not cap.isOpened():
+                print("[-] No se pudo leer el cuadro de la cámara.")
+                break
+            continue
         cv2.putText(
-            frame, "PRUEBA DE CAMARA - Presione 'Q' para salir", (20, 40),
+            frame, f"PRUEBA DE CAMARA - {frame.shape[1]}x{frame.shape[0]} @ {cap.fps:.0f} fps - 'Q' para salir", (20, 40),
             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2
         )
         cv2.imshow("Test de Video - Proyecto Biometrico", frame)

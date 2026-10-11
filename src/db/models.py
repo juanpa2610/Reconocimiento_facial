@@ -46,3 +46,66 @@ class RegistroAcceso:
     estado: str  # 'PERMITIDO', 'DENEGADO'
     timestamp: Optional[str] = None
     estudiante_id: Optional[int] = None
+
+
+@dataclass
+class Usuario:
+    """
+    Entidad de Usuario del Sistema con control de acceso basado en roles (RBAC).
+    Permite diferenciar entre 'administrador' (acceso total) y 'operador' (solo vigilancia).
+    """
+    id: Optional[int]
+    username: str
+    password_hash: str
+    nombre_completo: str
+    rol: str  # 'administrador', 'operador'
+    activo: bool = True
+    created_at: Optional[str] = None
+
+    def es_admin(self) -> bool:
+        return self.rol.lower() == "administrador" and self.activo
+
+
+@dataclass
+class CamaraConfig:
+    """
+    Entidad de Configuración de Cámaras de Video / Sensores de Acceso.
+    Permite registrar y switchear cámaras IP (RTSP) o locales dinámicamente sin tocar código.
+    """
+    id: Optional[int]
+    nombre: str
+    ip: str
+    usuario: str
+    password_enc: str  # Cifrada / protegida en reposo
+    puerto: int = 554
+    ruta_rtsp: str = "/stream2"
+    activa: bool = False
+    created_at: Optional[str] = None
+
+    def get_password_plana(self) -> str:
+        from src.utils.security import decrypt_camera_secret
+        return decrypt_camera_secret(self.password_enc)
+
+    def get_rtsp_url(self) -> str:
+        from src.utils.security import build_rtsp_url
+        return build_rtsp_url(self.ip, self.usuario, self.get_password_plana(), self.puerto, self.ruta_rtsp)
+
+    def get_safe_url(self) -> str:
+        from src.utils.security import build_safe_display_url
+        return build_safe_display_url(self.ip, self.usuario, self.puerto, self.ruta_rtsp)
+
+
+@dataclass
+class RegistroAuditoria:
+    """
+    Entidad de Bitácora de Acciones Administrativas Sensibles.
+    Garantiza trazabilidad de modificaciones y eliminaciones para la seguridad de la BD.
+    """
+    id: Optional[int]
+    usuario: str
+    operacion: str      # 'MODIFICAR_ESTUDIANTE', 'ELIMINAR_ESTUDIANTE', 'REGISTRAR_CAMARA', etc.
+    entidad: str        # 'ESTUDIANTE', 'CAMARA', 'USUARIO', 'SISTEMA'
+    detalles: str       # Registro de cambios sin almacenar contraseñas
+    resultado: str      # 'EXITO', 'FALLIDO_AUTENTICACION', 'CANCELADO', 'ERROR'
+    timestamp: Optional[str] = None
+

@@ -1,0 +1,295 @@
+================================================================================
+INSTITUTO TECNOLÓGICO SUPERIOR DE XALAPA (ITSX)
+MATERIA: (SCG-1009) GESTIÓN DE PROYECTOS
+ACTIVIDAD: U3P1 - ENTREGA DEL SEGUNDO SPRINT
+EQUIPO: EQUIPO 1 (GRUPO 1)
+FECHA LÍMITE DE ENTREGA: 16 DE OCTUBRE DE 2026, 23:59 HRS
+PUNTOS POSIBLES: 60 PUNTOS
+NOMENCLATURA REQUERIDA: (SCG-1009) Gestión de Proyectos - U3P1 - Equipo 1 (.docx y .pdf)
+================================================================================
+
+--------------------------------------------------------------------------------
+1. LISTA OFICIAL DE INTEGRANTES (ORDEN ALFABÉTICO POR APELLIDOS)
+--------------------------------------------------------------------------------
+1. Bello Franco Samantha              | No. Control: 237O00386 | Developer (Base de Datos & Integridad)
+2. Martínez Vera Josué Aldair         | No. Control: 237O00955 | Developer (Cámara IP, Hardware & RTSP)
+3. Morales Hernández Guadalupe Aleida | No. Control: 237O03473 | QA / Tester (Pruebas, Latencia & Benchmarks)
+4. Solís Contreras Darian Giselle     | No. Control: 237O00598 | Jira Lead & Agile Tracking / UI Support
+5. Trujillo Trujillo Juan Pablo       | No. Control: 237O00728 | Scrum Master & Algoritmos Biométricos
+6. Velázquez López Guadalupe          | No. Control: 237O00483 | Compliance LFPDPPP & Documentación Técnica
+
+================================================================================
+2. REPARTICIÓN DE MEJORAS AL PROGRAMA (SPRINT 2 - CÓDIGO Y SISTEMA)
+================================================================================
+
+--------------------------------------------------------------------------------
+INTEGRANTE: MARTÍNEZ VERA JOSUÉ ALDAIR
+ROL: Developer (Hardware, Cámara Tapo C310, Streaming RTSP y Conectividad)
+NOTA CLAVE: Josué tiene la cámara física y gestiona toda su conectividad.
+--------------------------------------------------------------------------------
+MEJORA AL PROGRAMA Y HARDWARE:
+1. Configuración y control físico de la cámara Tapo C310 (IP 192.168.1.101 en red local).
+2. Estabilización del flujo de video RTSP (`src/utils/video_stream.py`):
+   - Consolidar la clase `ThreadedCamera` que corre en hilo dedicado, descartando
+     fotogramas acumulados en el buffer y entregando únicamente el último frame capturado.
+   - Eliminar definitivamente el problema del Sprint 1 donde el video se retrasaba
+     hasta 2 minutos.
+   - Implementar reconexión automática transparente con timeout si la cámara sufre
+     micro-cortes en el cable Ethernet o Wi-Fi.
+3. NUEVO APARTADO DE CONFIGURACIÓN DE CÁMARA (INTERFAZ / MENÚ):
+   - Crear un apartado/modal o pantalla de configuración en la app (o archivo interactivo)
+     donde se pueda ingresar y editar fácilmente:
+     * Dirección IP de la cámara (ej. 192.168.1.101).
+     * Puerto RTSP (por defecto: 554).
+     * Usuario de la cuenta de cámara.
+     * Contraseña de la cuenta de cámara.
+     * Flujo de resolución: Stream 1 (HQ 2304x1296) o Stream 2 (Fluido 640x360).
+   - Incluir botón de "Probar Conexión" (Ping / Test RTSP) que valide la comunicación
+     y muestre si la cámara está en línea antes de iniciar el reconocimiento.
+   - Guardar estos parámetros en el archivo `.env` o en la configuración sin necesidad
+     de que el usuario tenga que editar código a mano.
+4. Ajuste de parámetros de visión:
+   - Configurar `CAMERA_MAX_WIDTH` y `DETECTION_WIDTH` para sostener 25-30 FPS estables.
+   - Probar y documentar el comportamiento de la cámara en modo diurno vs. visión nocturna (IR).
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] El video en vivo corre con latencia menor a 200 ms respecto al movimiento real.
+[ ] Existe un apartado funcional donde se configuran la IP, puerto, usuario y clave de la cámara.
+[ ] El botón de probar conexión confirma en menos de 2 segundos si la cámara responde.
+[ ] Si se desconecta la red y se reconecta, el stream se recupera automáticamente sin reiniciar la app.
+
+--------------------------------------------------------------------------------
+INTEGRANTE: SOLÍS CONTRERAS DARIAN GISELLE
+ROL: Jira Software Lead & Gestión Ágil / Apoyo UI
+NOTA CLAVE: Darian lidera el seguimiento en Jira y la gestión del tablero ágil.
+--------------------------------------------------------------------------------
+RESPONSABILIDAD PRINCIPAL: GESTIÓN COMPLETA EN JIRA SOFTWARE (SPRINT 2):
+1. Configuración y administración del Sprint 2 en Jira Software:
+   - Registrar la Meta del Sprint 2: "Optimización de latencia en flujo RTSP (<1.5s),
+     blindaje de integridad en base de datos y medición en tiempo real de tiempos de acceso".
+   - Crear y actualizar las tarjetas técnicas correspondientes a las historias de usuario
+     del Sprint 2 (PB-01 a PB-08).
+   - Asignar formalmente cada tarjeta en Jira a los integrantes responsables:
+     * SAI-09 (Josué): Optimización de streaming RTSP y apartado de configuración de IP.
+     * SAI-10 (Samantha): Integridad referencial y prevención de duplicados en BD.
+     * SAI-11 (Guadalupe M.): Pruebas automatizadas de latencia y benchmark por etapa.
+     * SAI-12 (Darian): Administración del tablero Scrum, Burndown chart y UX.
+     * SAI-13 (Juan Pablo): Cache de matriz de vectores y liveness (parpadeo).
+     * SAI-14 (Guadalupe V.): Cifrado de templates biométricos en reposo y LFPDPPP.
+2. Monitoreo diario del flujo de trabajo en el tablero digital:
+   - Mover tarjetas a través de las columnas: "To Do" -> "In Progress" -> "Testing" -> "Done".
+   - Vigilar la estimación en puntos de historia para que refleje el avance real del equipo.
+3. Generación y exportación de evidencias ágiles para la entrega:
+   - Generar el **Burndown Chart del Sprint 2** mostrando la quema de puntos de historia.
+   - Exportar capturas del panel de Jira al cierre del sprint para incluirlas en el reporte.
+4. Apoyo en la Interfaz Gráfica (GUI):
+   - Coordinar con Josué la integración visual del botón "Configurar Cámara / IP" en la barra de menú.
+   - Añadir la casilla obligatoria de consentimiento informado ("Acepto aviso de privacidad LFPDPPP").
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] Tablero de Jira 100% actualizado con todas las historias y tareas del Sprint 2.
+[ ] Burndown Chart generado reflejando la curva de trabajo completado del Sprint 2.
+[ ] Capturas nítidas del tablero en Jira listas para adjuntarse en el documento U3P1.
+
+--------------------------------------------------------------------------------
+INTEGRANTE: BELLO FRANCO SAMANTHA
+ROL: Developer (Base de Datos PostgreSQL / SQLite & Backend)
+--------------------------------------------------------------------------------
+MEJORA AL PROGRAMA:
+1. Corrección de integridad referencial y prevención de sobreescritura en `src/db/database.py`:
+   - Reemplazar la sentencia `ON CONFLICT DO UPDATE` por `INSERT` con captura de excepción
+     por matrícula duplicada (`IntegrityError`). Si la matrícula ya existe, notificar el error
+     en lugar de pisar los datos y el vector biométrico en silencio.
+2. Eliminación segura de usuarios (`delete_estudiante`):
+   - Corregir el `DELETE` físico: configurar clave foránea con `ON DELETE SET NULL` o borrado
+     lógico (soft-delete), eliminando el template biométrico pero preservando el historial
+     de accesos previo de forma anonimizada para auditoría.
+3. Incorporación de métricas de investigación (variable dependiente):
+   - Ampliar la tabla `registro_accesos` para registrar:
+     * `tiempo_acceso_segundos`: tiempo exacto transcurrido desde que se detecta el rostro
+       hasta que se toma la decisión de acceso.
+     * `tipo_usuario`: estudiante, docente, visitante temporal.
+     * `condicion_luz`: iluminación diurna, luz artificial, visión nocturna infrarroja.
+4. Conexiones y zonas horarias:
+   - Asegurar el cierre de conexiones en SQLite usando `contextlib.closing` y estandarizar
+     los timestamps a la zona horaria oficial `America/Mexico_City`.
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] Intentar registrar dos veces la misma matrícula arroja excepción controlada sin pisar datos.
+[ ] Al eliminar un alumno, la bitácora histórica de accesos se preserva sin registros huérfanos.
+[ ] La tabla de accesos guarda el tiempo de respuesta exacto en segundos para cada intento.
+
+--------------------------------------------------------------------------------
+INTEGRANTE: MORALES HERNÁNDEZ GUADALUPE ALEIDA
+ROL: QA / Tester (Pruebas Automatizadas, Latencia y Calidad)
+--------------------------------------------------------------------------------
+MEJORA AL PROGRAMA:
+1. Crear la suite de benchmarks y latencia en `tests/test_performance.py`:
+   - Automatizar la medición de tiempos por etapa en el pipeline de acceso:
+     * Etapa 1: Captura de fotograma RTSP.
+     * Etapa 2: Detección del rostro (Dlib / HOG).
+     * Etapa 3: Extracción del vector 128-D (ResNet-34).
+     * Etapa 4: Comparación vectorial euclidiana (matching contra BD).
+2. Validar el cumplimiento del criterio de aceptación del Sprint 2:
+   - Verificar que el tiempo total de procesamiento por usuario sea `<= 1.5 segundos`.
+3. Pruebas de estrés y robustez:
+   - Realizar pruebas bajo condiciones variables: diferentes ángulos de rostro, oclusiones
+     (lentes, cubrebocas, gorras) y diferentes condiciones de luz (normal vs. infrarrojo).
+4. Estabilizar la suite de pruebas unitarias en `tests/test_biometrics.py`:
+   - Fijar semillas aleatorias (`np.random.seed(42)`) para que las pruebas sintéticas
+     no presenten fallos intermitentes.
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] Script de benchmark funcional que imprima el desglose de tiempos promedio de cada etapa.
+[ ] Suite de pruebas completa (`python3 -m unittest discover -s tests -v`) aprobada al 100%.
+[ ] Tabla de resultados con mediciones reales de tiempo en al menos 10 intentos consecutivos.
+
+--------------------------------------------------------------------------------
+INTEGRANTE: TRUJILLO TRUJILLO JUAN PABLO
+ROL: Scrum Master & Core Logic (Matching Vectorial, Concurrencia e Integración)
+--------------------------------------------------------------------------------
+MEJORA AL PROGRAMA:
+1. Optimización del algoritmo de matching en `src/biometrics/matcher.py`:
+   - Implementar almacenamiento en memoria caché de la matriz de templates `M (N x 128)`.
+   - Cargar la matriz una sola vez al iniciar la aplicación o recargarla solo cuando se dé de
+     alta o baja un usuario, evitando reconstruir arrays en cada frame (reduce el tiempo a < 1 ms).
+2. Concurrencia en la interfaz gráfica (`src/gui/app.py`):
+   - Desacoplar el procesamiento biométrico pesado del hilo de Tkinter utilizando colas
+     (`queue.Queue`) para que la aplicación nunca se congele ni marque "No responde".
+3. Filtro de Anti-suplantación / Liveness (detección de parpadeo):
+   - Implementar cálculo de Eye Aspect Ratio (EAR) utilizando los puntos de referencia faciales
+     para verificar parpadeo humano real, impidiendo que una foto impresa o en celular acceda.
+4. Integración central y configuración:
+   - Unificar constantes en `config.py` (umbral d <= 0.55, timeouts, variables de entorno).
+   - Resolver conflictos de integración en Git y asegurar la estabilidad de `main.py`.
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] La comparación de un rostro contra toda la base de datos toma menos de 2 milisegundos.
+[ ] La interfaz se mantiene fluida y responsiva durante todo el ciclo de reconocimiento.
+[ ] El sistema cuenta con validación básica de liveness para rechazar fotos estáticas.
+
+--------------------------------------------------------------------------------
+INTEGRANTE: VELÁZQUEZ LÓPEZ GUADALUPE
+ROL: Compliance LFPDPPP, Privacidad y Edición del Documento Final
+--------------------------------------------------------------------------------
+MEJORA AL PROGRAMA:
+1. Módulo de cifrado de templates en reposo (`src/utils/crypto.py`):
+   - Cifrar los vectores de 128-D en formato BLOB con criptografía simétrica (Fernet / AES
+     usando clave secreta en `.env`), garantizando que si la base de datos es extraída,
+     los vectores biométricos no sean legibles (cumplimiento estricto de la LFPDPPP).
+2. Módulo de auditoría y exportación a CSV (`src/modules/admin.py`):
+   - Actualizar la exportación para incluir: Matrícula, Nombre, Fecha/Hora local, Tiempo total (s),
+     Distancia Euclidiana, Estatus de Acceso (AUTORIZADO / DENEGADO) y Condición de Iluminación.
+3. Aviso de Privacidad en la GUI:
+   - Diseñar la ventana modal con el texto legal oficial del ITSX según el Art. 3 y Art. 13 de la LFPDPPP.
+4. Edición y Maquetación del Documento U3P1:
+   - Integrar todas las secciones del documento formal en Word y exportar el PDF con la nomenclatura oficial.
+
+CRITERIOS DE ACEPTACIÓN:
+[ ] Los templates biométricos se persisten cifrados en la base de datos.
+[ ] La exportación genera un archivo CSV con las columnas completas de la investigación.
+[ ] El documento formal cumple con la estructura institucional al 100%.
+
+================================================================================
+3. REPARTICIÓN DEL DOCUMENTO FORMAL (WORD Y PDF) - ACTIVIDAD U3P1
+================================================================================
+
+Nomenclatura requerida:
+- `(SCG-1009) Gestión de Proyectos - U3P1 - Equipo 1.docx`
+- `(SCG-1009) Gestión de Proyectos - U3P1 - Equipo 1.pdf`
+
+Distribución de secciones:
+
+1. HOJA DE PRESENTACIÓN E ÍNDICE
+   - Responsable: Velázquez López Guadalupe
+   - Contenido:
+     * Logotipos oficiales del ITSX y TecNM.
+     * Instituto Tecnológico Superior de Xalapa.
+     * Materia: (SCG-1009) Gestión de Proyectos.
+     * Docente: Alba Hernández Jessecka.
+     * Lista de los 6 alumnos ordenados alfabéticamente por apellidos con número de control.
+     * Actividad: U3P1 - Entrega del segundo sprint.
+     * Fecha de entrega: 16 de octubre de 2026.
+     * Sin faltas de ortografía (revisión ortográfica rigurosa).
+     * Índice automático de Word.
+
+2. TEMA DEL PROYECTO
+   - Responsable: Trujillo Trujillo Juan Pablo
+   - Contenido:
+     * Título oficial del proyecto: "La implementación de un sistema de reconocimiento facial
+       para optimizar el flujo de acceso al ITSX".
+     * Resumen del alcance y objetivos del Sprint 2.
+
+3. DESCRIPCIÓN DE LA FUNCIONALIDAD CORREGIDA (CON CAPTURAS DE PANTALLA)
+   - Responsable: Martínez Vera Josué Aldair
+   - Contenido:
+     * Detalle de la corrección del retraso del flujo RTSP (solución al lag de 2 minutos).
+     * Explicación de la implementación de `ThreadedCamera` y el descarte de buffer antiguo.
+     * Explicación y capturas del **nuevo apartado de configuración de IP y parámetros de cámara**.
+     * Evidencia de la tasa de 25-30 FPS en tiempo real.
+     * Capturas:
+       - Captura 1: Apartado de configuración de IP, usuario y contraseña de la cámara.
+       - Captura 2: Prueba de conexión exitosa con la cámara Tapo C310.
+       - Captura 3: Stream RTSP en vivo fluido con indicador de latencia reducida.
+
+4. DESCRIPCIÓN DEL AVANCE FUNCIONAL DEL SPRINT ACTUAL (CON CAPTURAS DE PANTALLA)
+   - Responsables: Bello Franco Samantha & Morales Hernández Guadalupe Aleida
+   - Contenido:
+     * Explicación de las nuevas funcionalidades desarrolladas en el Sprint 2:
+       - Medición del tiempo de acceso en segundos (variable dependiente).
+       - Prevención de duplicados con rechazo de sobrescritura en la BD.
+       - Cifrado de plantillas biométricas en reposo (LFPDPPP).
+       - Resultados de las pruebas de latencia (< 1.5 s).
+     * Capturas:
+       - Captura 1: Intento de registro con matrícula repetida arrojando alerta de duplicado.
+       - Captura 2: Acceso autorizado mostrando en pantalla el tiempo de procesamiento (< 1.2 s).
+       - Captura 3: Tabla de base de datos / CSV con el registro de tiempos y distancias euclidianas.
+       - Captura 4: Gráfica o tabla con los resultados del benchmark de rendimiento por etapa.
+
+5. RETROSPECTIVA DEL SPRINT 2 (LOS TRES ASPECTOS OBLIGATORIOS)
+   - Responsables: Solís Contreras Darian Giselle & Trujillo Trujillo Juan Pablo
+   - Aspecto 1: Adaptaciones del proyecto conforme los comentarios realizados en la entrega previa.
+     (Cómo se resolvieron las observaciones del docente sobre el lag y la estabilidad).
+   - Aspecto 2: Bitácora de la reunión de retrospectiva: problemas presentados en el sprint actual.
+     (Técnicos: conexión a cámara física, configuración de red LAN; Comunicación: acuerdos de integración).
+   - Aspecto 3: Qué acciones se aplicaron en el sprint actual para mejorar.
+     (Uso de hilos dedicados, división de tareas en Jira, validaciones preventivas de código).
+   - EVIDENCIA ÁGIL DE JIRA (Darian Solís):
+     * Captura del tablero Scrum de Jira al cierre del Sprint 2 con tarjetas en "Done".
+     * Burndown Chart del Sprint 2 mostrando la quema de puntos de historia.
+     * Listado consolidado del estado de las tareas y estimaciones.
+
+6. REVISIÓN Y COMPILACIÓN FINAL
+   - Responsables: Velázquez López Guadalupe & Trujillo Trujillo Juan Pablo
+   - Verificación de consistencia, generación del PDF y verificación de la nomenclatura exacta.
+
+================================================================================
+4. GUÍA PARA LA DEMOSTRACIÓN FUNCIONAL PRESENCIAL
+================================================================================
+
+Ambas demostraciones son de carácter PRESENCIAL ante el docente:
+
+1. DEMOSTRACIÓN FUNCIONAL CORREGIDA (Liderada por Josué Martínez con apoyo del equipo):
+   - Llevar la cámara física Tapo C310 y la laptop en la misma red local.
+   - Abrir el nuevo apartado de configuración e ingresar la IP de la cámara.
+   - Ejecutar la prueba de conexión y abrir el stream en vivo.
+   - Demostrar que una persona se mueve frente a la cámara y el movimiento en pantalla
+     es INMEDIATO (latencia < 200 ms), demostrando que el retraso del Sprint 1 fue resuelto.
+
+2. DEMOSTRACIÓN FUNCIONAL DEL SPRINT ACTUAL (Liderada por todo el equipo):
+   - Proceso de enrolamiento: Mostrar el registro de un alumno nuevo con consentimiento LFPDPPP,
+     validando que no se guardan fotos, sino un vector cifrado de 1024 bytes.
+   - Probar intentar registrar la misma matrícula para mostrar el bloqueo de duplicados.
+   - Control de acceso en vivo: Una persona autorizada se coloca frente a la cámara; el sistema
+     la identifica en menos de 1.5 segundos, muestra la tarjeta verde y registra el tiempo en BD.
+   - Mostrar la bitácora con los tiempos exactos almacenados.
+
+================================================================================
+5. CRONOGRAMA DE TRABAJO (SEMANA DEL 11 AL 16 DE OCTUBRE DE 2026)
+================================================================================
+- Domingo 11 - Lunes 12: Desarrollo técnico de cada módulo e integración en el código.
+- Martes 13: Sesión presencial para conectar la cámara Tapo C310 de Josué y hacer pruebas de red.
+- Miércoles 14: Pruebas de latencia con Guadalupe Morales y actualización de Jira con Darian Solís.
+- Jueves 15: Redacción final del documento Word con Guadalupe Velázquez y revisión ortográfica.
+- Viernes 16 (hasta las 20:00 hrs): Exportación a PDF, revisión de nombres y entrega en plataforma.
+================================================================================

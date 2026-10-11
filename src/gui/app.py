@@ -22,15 +22,24 @@ import time
 from datetime import datetime
 import os
 import gc
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 
 import config
 from src.db.database import Database
-from src.db.models import Estudiante
+from src.db.models import Estudiante, Usuario, CamaraConfig, RegistroAuditoria
 from src.biometrics.encoder import FaceEncoder
 from src.biometrics.matcher import FaceMatcher, MatchResult
 from src.modules.registro import verificar_rostro_previo
 from src.utils.visualizer import Visualizer
+from src.utils.video_stream import ThreadedCamera
+from src.utils.security import mask_camera_secret, build_rtsp_url, build_safe_display_url
+from src.utils.camera_tester import test_camera_connection_async
+from src.gui.dialogs import (
+    LoginDialog,
+    ConfirmAdminDialog,
+    EditEstudianteDialog,
+    CrearUsuarioDialog
+)
 
 try:
     import mediapipe as mp
@@ -80,17 +89,41 @@ class GuardApp:
 
         self.root.configure(bg=self.COLOR_BG)
 
-        # Base de datos y motor biométrico
+        # Base de datos y autenticación
         self.db = Database()
         self.db.init_db()
+        self.current_user: Optional[Usuario] = None
+
+        # Motor biométrico
         self.encoder = FaceEncoder(model=config.DETECTION_MODEL)
         self.matcher = FaceMatcher(threshold=config.FACE_DISTANCE_THRESHOLD)
         self.estudiantes: List[Estudiante] = self.db.get_all_active_estudiantes()
+        self.matcher.set_known_students(self.estudiantes)
 
-        # Dispositivo de video
-        self.video_source = config.VIDEO_SOURCE
-        self.cap = None
+        # Dispositivo / Flujo de video inicial (resuelto dinámicamente desde la BD)
+        cam_activa = self.db.obtener_camara_activa()
+        if cam_activa:
+            if cam_activa.ip in ("0", "", "localhost_cam"):
+                try:
+                    self.video_source = int(cam_activa.ip)
+                except ValueError:
+                    self.video_source = 0
+            else:
+                self.video_source = cam_activa.get_rtsp_url()
+            self.nombre_camara_activa = cam_activa.nombre
+        else:
+            self.video_source = config.VIDEO_SOURCE
+            self.nombre_camara_activa = "Cámara Predeterminada"
+
+        self.cap: Optional[ThreadedCamera] = None
         self.is_camera_running = False
+        self._camera_started = False
+
+        # Caché de resultados para procesar solo 1 de cada N cuadros (baja latencia)
+        self._frame_counter = 0
+        self._cache_acceso = []          # lista de dicts con caja + datos de coincidencia
+        self._cache_landmarks = []       # landmarks del rostro en la pestaña de registro
+        self._cache_n_rostros_reg = 0
 
         # Auditoría y contadores del día
         self.db_cooldown: Dict[str, float] = {}
@@ -120,9 +153,11 @@ class GuardApp:
         self._build_notebook()
         self._build_statusbar()
 
-        # Iniciar reloj y cámara
+        # Iniciar reloj institucional
         self._actualizar_reloj()
-        self._iniciar_camara()
+
+        # Programar pantalla de Login obligatoria al iniciar
+        self.root.after(100, self._mostrar_login)
 
         # Evento de cierre
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -224,23 +259,49 @@ class GuardApp:
         )
         lbl_sub.pack(anchor=tk.W)
 
-        # Lado derecho: Reloj en vivo y Status Badge
+        # Lado derecho: Sesión de usuario, Reloj en vivo y Status Badge
         right_box = tk.Frame(header, bg=self.COLOR_PANEL)
         right_box.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Reloj digital institucional
+        top_right_row = tk.Frame(right_box, bg=self.COLOR_PANEL)
+        top_right_row.pack(anchor=tk.E, pady=(0, 4))
+
         self.lbl_clock = tk.Label(
-            right_box,
+            top_right_row,
             text="--:--:--  |  --/--/----",
             font=("Helvetica", 11, "bold"),
             fg=self.COLOR_ACCENT,
             bg=self.COLOR_PANEL
         )
-        self.lbl_clock.pack(anchor=tk.E, pady=(2, 4))
+        self.lbl_clock.pack(side=tk.LEFT, padx=(0, 12))
 
-        # Badge de estado de BD y cámara
-        badge = tk.Frame(right_box, bg=self.COLOR_CARD, padx=12, pady=5, bd=1, relief=tk.GROOVE)
+        self.btn_logout = tk.Button(
+            top_right_row,
+            text="🚪 Cerrar Sesión",
+            font=("Helvetica", 9, "bold"),
+            bg="#334155",
+            fg="#ffffff",
+            activebackground="#475569",
+            relief=tk.FLAT,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._cerrar_sesion
+        )
+        self.btn_logout.pack(side=tk.RIGHT)
+
+        # Badge de usuario y estado de base de datos
+        badge = tk.Frame(right_box, bg=self.COLOR_CARD, padx=12, pady=4, bd=1, relief=tk.GROOVE)
         badge.pack(anchor=tk.E)
+
+        self.lbl_user_badge = tk.Label(
+            badge,
+            text="👤 Sesión: Requerida",
+            font=("Helvetica", 9, "bold"),
+            fg=self.COLOR_GOLD_ITSX,
+            bg=self.COLOR_CARD
+        )
+        self.lbl_user_badge.pack(side=tk.LEFT, padx=(0, 12))
 
         self.lbl_db_badge = tk.Label(
             badge,
@@ -249,13 +310,88 @@ class GuardApp:
             fg=self.COLOR_GREEN,
             bg=self.COLOR_CARD
         )
-        self.lbl_db_badge.pack()
+        self.lbl_db_badge.pack(side=tk.RIGHT)
 
     def _actualizar_reloj(self):
         """Actualiza el reloj institucional cada segundo."""
         ahora = datetime.now().strftime("%H:%M:%S  |  %d/%m/%Y")
         self.lbl_clock.config(text=ahora)
         self.root.after(1000, self._actualizar_reloj)
+
+    def _mostrar_login(self):
+        """Despliega la pantalla modal de inicio de sesión."""
+        LoginDialog(
+            parent=self.root,
+            db=self.db,
+            on_success=self._on_login_exitoso,
+            on_cancel=self._on_login_cancelado
+        )
+
+    def _on_login_exitoso(self, usuario: Usuario):
+        """Callback invocado cuando el usuario se autentica correctamente."""
+        self.current_user = usuario
+        self._aplicar_permisos_usuario()
+
+        # Iniciar cámara solo una vez después del login
+        if not self._camera_started:
+            self._iniciar_camara()
+            self._camera_started = True
+
+    def _on_login_cancelado(self):
+        """Si el usuario cancela o cierra la ventana de login sin autenticarse, salir."""
+        if not self.current_user:
+            self._on_close()
+
+    def _cerrar_sesion(self):
+        """Cierra la sesión actual y solicita re-autenticación."""
+        if messagebox.askyesno("Cerrar Sesión", "¿Está seguro de que desea cerrar la sesión actual?"):
+            if self.current_user:
+                self.db.log_auditoria(
+                    self.current_user.username,
+                    "CIERRE_SESION",
+                    "SISTEMA",
+                    f"Sesión cerrada por el usuario '{self.current_user.username}'",
+                    "EXITO"
+                )
+            self.current_user = None
+            self.lbl_user_badge.config(text="👤 Sesión: Requerida", fg=self.COLOR_RED)
+            try:
+                self.notebook.select(self.tab_acceso)
+            except Exception:
+                pass
+            self._mostrar_login()
+
+    def _aplicar_permisos_usuario(self):
+        """Aplica el Control de Acceso Basado en Roles (RBAC) en la interfaz gráfica."""
+        if not self.current_user:
+            return
+
+        tabs_existentes = [self.notebook.tab(i, "text").strip() for i in range(self.notebook.index("end"))]
+
+        if self.current_user.es_admin():
+            self.lbl_user_badge.config(
+                text=f"👑 Administrador: {self.current_user.username}",
+                fg=self.COLOR_GOLD_ITSX
+            )
+            # Asegurar pestañas de administrador
+            if not any("Configuración" in t for t in tabs_existentes):
+                self.notebook.add(self.tab_configuracion, text="   ⚙️  Configuración   ")
+            if not any("Seguridad" in t for t in tabs_existentes):
+                self.notebook.add(self.tab_seguridad, text="   🔒  Seguridad y Auditoría   ")
+        else:
+            self.lbl_user_badge.config(
+                text=f"👤 Operador: {self.current_user.username}",
+                fg=self.COLOR_ACCENT
+            )
+            # Ocultar pestañas restringidas para el operador
+            try:
+                self.notebook.forget(self.tab_configuracion)
+            except Exception:
+                pass
+            try:
+                self.notebook.forget(self.tab_seguridad)
+            except Exception:
+                pass
 
     def _build_notebook(self):
         self.notebook = ttk.Notebook(self.root)
@@ -275,6 +411,16 @@ class GuardApp:
         self.tab_bitacora = tk.Frame(self.notebook, bg=self.COLOR_BG)
         self.notebook.add(self.tab_bitacora, text="   📋  Bitácora y Padrón ITSX   ")
         self._build_tab_bitacora()
+
+        # Pestaña 4: Configuración de Cámaras (Administración)
+        self.tab_configuracion = tk.Frame(self.notebook, bg=self.COLOR_BG)
+        self.notebook.add(self.tab_configuracion, text="   ⚙️  Configuración   ")
+        self._build_tab_configuracion()
+
+        # Pestaña 5: Seguridad y Auditoría (Admin)
+        self.tab_seguridad = tk.Frame(self.notebook, bg=self.COLOR_BG)
+        self.notebook.add(self.tab_seguridad, text="   🔒  Seguridad y Auditoría   ")
+        self._build_tab_seguridad()
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
@@ -576,6 +722,13 @@ class GuardApp:
         )
         btn_del.pack(side=tk.RIGHT)
 
+        btn_edit = tk.Button(
+            r_top, text="✏️  Editar Alumno", font=("Helvetica", 9, "bold"),
+            bg="#D97706", fg="#ffffff", relief=tk.FLAT, padx=9, pady=4, cursor="hand2",
+            command=self._editar_alumno_seleccionado
+        )
+        btn_edit.pack(side=tk.RIGHT, padx=(0, 6))
+
         cols_est = ("id", "matricula", "nombre", "carrera", "tam")
         self.tree_estudiantes = ttk.Treeview(f_right, columns=cols_est, show="headings", height=16)
         self.tree_estudiantes.heading("id", text="ID")
@@ -616,104 +769,164 @@ class GuardApp:
     # -------------------------------------------------------------------------
     def _iniciar_camara(self):
         try:
-            self.cap = cv2.VideoCapture(self.video_source)
-            if not self.cap.isOpened():
+            # Lector en hilo aparte: siempre entrega el cuadro MÁS RECIENTE (sin delay acumulado)
+            self.cap = ThreadedCamera(self.video_source)
+            if not self.cap.start():
+                self.cap = None
                 self.lbl_status.config(
-                    text=f"⚠️ No se pudo acceder a la fuente de video '{self.video_source}'.",
+                    text=f"⚠️ No se pudo acceder a la fuente de video '{self.nombre_camara_activa}'.",
                     fg=self.COLOR_GOLD_ITSX
                 )
                 return
             self.is_camera_running = True
+            if hasattr(self, "lbl_gate_name"):
+                self.lbl_gate_name.config(text=f"SENSOR: {self.nombre_camara_activa.upper()}")
+            self.lbl_status.config(
+                text=f"🟢 Transmitiendo en vivo desde: {self.nombre_camara_activa} | ResNet-34 en línea",
+                fg=self.COLOR_GREEN
+            )
             self._loop_camara()
         except Exception as e:
             self.lbl_status.config(text=f"[-] Error al abrir video: {e}", fg=self.COLOR_RED)
 
+    def _cambiar_fuente_camara(self, nueva_fuente, nombre_camara: str) -> bool:
+        """
+        Cambia dinámicamente la fuente de video en vivo sin reiniciar el programa.
+        Detiene el lector previo y arranca la nueva conexión RTSP o dispositivo.
+        """
+        self.is_camera_running = False
+        if self.cap is not None:
+            try:
+                self.cap.release()
+            except Exception:
+                pass
+            self.cap = None
+
+        self.video_source = nueva_fuente
+        self.nombre_camara_activa = nombre_camara
+
+        if hasattr(self, "lbl_gate_name"):
+            self.lbl_gate_name.config(text=f"SENSOR: {nombre_camara.upper()}")
+
+        try:
+            self.cap = ThreadedCamera(self.video_source)
+            if not self.cap.start():
+                self.cap = None
+                self.lbl_status.config(
+                    text=f"⚠️ No se pudo conectar con la cámara '{nombre_camara}'. Verifique la red.",
+                    fg=self.COLOR_GOLD_ITSX
+                )
+                return False
+
+            self.is_camera_running = True
+            self.lbl_status.config(
+                text=f"🟢 Transmitiendo en vivo desde: {nombre_camara} | ResNet-34 en línea",
+                fg=self.COLOR_GREEN
+            )
+            return True
+        except Exception as e:
+            self.lbl_status.config(text=f"[-] Error al cambiar de cámara: {e}", fg=self.COLOR_RED)
+            return False
+
     def _loop_camara(self):
-        if not self.is_camera_running or self.cap is None:
+        if not getattr(self, "is_camera_running", False) or self.cap is None:
+            # Reintentar en 200 ms si la cámara está en pausa o cambiando
+            self.root.after(200, self._loop_camara)
             return
 
-        ret, frame = self.cap.read()
+        # timeout=0 -> no bloquea la interfaz: si no hay cuadro nuevo, simplemente se reintenta
+        ret, frame = self.cap.read(timeout=0)
         if ret:
-            current_tab = self.notebook.index(self.notebook.select())
-            if current_tab == 0:
-                self._procesar_cuadro_acceso(frame)
-            elif current_tab == 1:
-                self._procesar_cuadro_registro(frame)
+            self._frame_counter += 1
+            try:
+                current_tab = self.notebook.index(self.notebook.select())
+                if current_tab == 0:
+                    self._procesar_cuadro_acceso(frame)
+                elif current_tab == 1:
+                    self._procesar_cuadro_registro(frame)
+            except Exception:
+                pass
 
-        self.root.after(30, self._loop_camara)
+        self.root.after(10, self._loop_camara)
 
     def _procesar_cuadro_acceso(self, frame):
-        h, w, _ = frame.shape
-        small_frame = cv2.resize(frame, (0, 0), fx=0.5, fy=0.5)
-        rgb_small = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-
-        boxes = self.encoder.detect_face_locations(rgb_small)
-        encodings = self.encoder.extract_encodings(rgb_small, boxes)
-
         ahora = time.time()
-        alguien_reconocido = False
 
-        for small_box, encoding in zip(boxes, encodings):
-            top, right, bottom, left = small_box
-            box = (top * 2, right * 2, bottom * 2, left * 2)
+        # Detección + encoding + matching SOLO 1 de cada N cuadros; los demás reutilizan la caché
+        if self._frame_counter % config.PROCESS_EVERY_N_FRAMES == 0:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            # Detección sobre copia reducida (rápido); encoding sobre el cuadro completo (mejor vector)
+            boxes = self.encoder.detect_face_locations_scaled(rgb_frame, config.DETECTION_WIDTH)
+            encodings = self.encoder.extract_encodings(rgb_frame, boxes)
 
-            match = self.matcher.match(encoding, self.estudiantes)
+            self._cache_acceso = []
+            alguien_reconocido = False
 
-            if match.reconocido and match.estudiante:
-                alguien_reconocido = True
-                est = match.estudiante
+            for box, encoding in zip(boxes, encodings):
+                match = self.matcher.match_candidate(encoding)
 
-                self.access_card_state = {
-                    "status": "AUTORIZADO",
-                    "name": est.nombre,
-                    "matricula": est.matricula,
-                    "carrera": est.carrera or "Sin Carrera",
-                    "distancia": match.distancia,
-                    "confianza": match.confianza_pct,
-                    "timer": ahora
-                }
+                if match.reconocido and match.estudiante:
+                    alguien_reconocido = True
+                    est = match.estudiante
 
-                Visualizer.draw_recognition_box(
-                    frame=frame, box=box, nombre=est.nombre, matricula=est.matricula,
-                    distancia=match.distancia, confianza=match.confianza_pct, es_autorizado=True
-                )
-
-                last_log = self.db_cooldown.get(est.matricula, 0.0)
-                if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
-                    self.db_cooldown[est.matricula] = ahora
-                    self.db.log_acceso(
-                        estudiante_id=est.id, matricula=est.matricula,
-                        nombre=est.nombre, distancia=match.distancia, estado="PERMITIDO"
-                    )
-                    self.conteo_autorizados += 1
-                    self.lbl_count_auth.config(text=str(self.conteo_autorizados))
-
-            else:
-                Visualizer.draw_recognition_box(
-                    frame=frame, box=box, nombre="Desconocido", matricula=None,
-                    distancia=match.distancia, confianza=match.confianza_pct, es_autorizado=False
-                )
-
-                if not alguien_reconocido and (ahora - self.access_card_state["timer"] > config.VISUAL_STATUS_PERSISTENCE_SECONDS):
                     self.access_card_state = {
-                        "status": "DENEGADO",
-                        "name": "Persona No Registrada",
-                        "matricula": "---",
-                        "carrera": "Acceso Restringido",
+                        "status": "AUTORIZADO",
+                        "name": est.nombre,
+                        "matricula": est.matricula,
+                        "carrera": est.carrera or "Sin Carrera",
                         "distancia": match.distancia,
                         "confianza": match.confianza_pct,
                         "timer": ahora
                     }
 
-                    last_log = self.db_cooldown.get("UNKNOWN", 0.0)
+                    self._cache_acceso.append({
+                        "box": box, "nombre": est.nombre, "matricula": est.matricula,
+                        "distancia": match.distancia, "confianza": match.confianza_pct, "auth": True
+                    })
+
+                    last_log = self.db_cooldown.get(est.matricula, 0.0)
                     if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
-                        self.db_cooldown["UNKNOWN"] = ahora
+                        self.db_cooldown[est.matricula] = ahora
                         self.db.log_acceso(
-                            estudiante_id=None, matricula=None,
-                            nombre="Desconocido", distancia=match.distancia, estado="DENEGADO"
+                            estudiante_id=est.id, matricula=est.matricula,
+                            nombre=est.nombre, distancia=match.distancia, estado="PERMITIDO"
                         )
-                        self.conteo_denegados += 1
-                        self.lbl_count_den.config(text=str(self.conteo_denegados))
+                        self.conteo_autorizados += 1
+                        self.lbl_count_auth.config(text=str(self.conteo_autorizados))
+
+                else:
+                    self._cache_acceso.append({
+                        "box": box, "nombre": "Desconocido", "matricula": None,
+                        "distancia": match.distancia, "confianza": match.confianza_pct, "auth": False
+                    })
+
+                    if not alguien_reconocido and (ahora - self.access_card_state["timer"] > config.VISUAL_STATUS_PERSISTENCE_SECONDS):
+                        self.access_card_state = {
+                            "status": "DENEGADO",
+                            "name": "Persona No Registrada",
+                            "matricula": "---",
+                            "carrera": "Acceso Restringido",
+                            "distancia": match.distancia,
+                            "confianza": match.confianza_pct,
+                            "timer": ahora
+                        }
+
+                        last_log = self.db_cooldown.get("UNKNOWN", 0.0)
+                        if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
+                            self.db_cooldown["UNKNOWN"] = ahora
+                            self.db.log_acceso(
+                                estudiante_id=None, matricula=None,
+                                nombre="Desconocido", distancia=match.distancia, estado="DENEGADO"
+                            )
+                            self.conteo_denegados += 1
+                            self.lbl_count_den.config(text=str(self.conteo_denegados))
+
+        # Dibujar SIEMPRE las cajas en caché sobre el cuadro actual (video fluido entre detecciones)
+        for det in self._cache_acceso:
+            Visualizer.draw_recognition_box(
+                frame=frame, box=det["box"], nombre=det["nombre"], matricula=det["matricula"],
+                distancia=det["distancia"], confianza=det["confianza"], es_autorizado=det["auth"]
+            )
 
         self._renderizar_tarjeta_acceso(ahora)
         self._mostrar_en_label(frame, self.video_label_acceso)
@@ -744,7 +957,7 @@ class GuardApp:
             self.lbl_card_mat.config(text="Matrícula: ---", bg="#4C1D24")
             self.lbl_card_car.config(text="Acceso Restringido", bg="#4C1D24")
             self.lbl_card_metric.config(
-                text=f"Distancia mínima: {self.access_card_state['distancia']:.3f} > 0.55",
+                text=f"Distancia mínima: {self.access_card_state['distancia']:.3f} > {config.FACE_DISTANCE_THRESHOLD:.2f}",
                 fg=self.COLOR_RED, bg="#4C1D24"
             )
 
@@ -760,13 +973,21 @@ class GuardApp:
 
     def _procesar_cuadro_registro(self, frame):
         frame_mirror = cv2.flip(frame, 1)
-        rgb_frame = cv2.cvtColor(frame_mirror, cv2.COLOR_BGR2RGB)
 
-        landmarks_list = face_recognition.face_landmarks(rgb_frame)
-        if len(landmarks_list) == 1:
-            Visualizer.draw_facial_landmarks(frame_mirror, landmarks_list[0])
+        # Detección + landmarks solo 1 de cada N cuadros (sobre copia reducida); el resto usa la caché
+        if self._frame_counter % config.PROCESS_EVERY_N_FRAMES == 0:
+            rgb_frame = cv2.cvtColor(frame_mirror, cv2.COLOR_BGR2RGB)
+            boxes = self.encoder.detect_face_locations_scaled(rgb_frame, config.DETECTION_WIDTH)
+            self._cache_n_rostros_reg = len(boxes)
+            self._cache_landmarks = (
+                face_recognition.face_landmarks(rgb_frame, face_locations=boxes)
+                if len(boxes) == 1 else []
+            )
+
+        if self._cache_n_rostros_reg == 1 and self._cache_landmarks:
+            Visualizer.draw_facial_landmarks(frame_mirror, self._cache_landmarks[0])
             Visualizer.draw_banner(frame_mirror, "Rostro Enfocado | Presione 'Escanear Rostro'", color=(46, 204, 113))
-        elif len(landmarks_list) == 0:
+        elif self._cache_n_rostros_reg == 0:
             Visualizer.draw_banner(frame_mirror, "Buscando rostro... Enfoquese al centro", color=(23, 192, 235))
         else:
             Visualizer.draw_banner(frame_mirror, "Multiples personas detectadas", color=(52, 73, 235))
@@ -798,7 +1019,7 @@ class GuardApp:
             messagebox.showerror("Error de Cámara", "La cámara no está disponible.")
             return
 
-        ret, frame = self.cap.read()
+        ret, frame = self.cap.read(timeout=2.0)
         if not ret:
             messagebox.showerror("Error", "No se pudo leer el fotograma.")
             return
@@ -806,7 +1027,7 @@ class GuardApp:
         frame_mirror = cv2.flip(frame, 1)
         rgb_frame = cv2.cvtColor(frame_mirror, cv2.COLOR_BGR2RGB)
 
-        boxes = self.encoder.detect_face_locations(rgb_frame)
+        boxes = self.encoder.detect_face_locations_scaled(rgb_frame, max(config.DETECTION_WIDTH, 640))
         if len(boxes) == 0:
             self.lbl_scan_result.config(
                 text="❌ No se detectó ningún rostro. Pida al alumno colocarse de frente al centro.",
@@ -840,7 +1061,7 @@ class GuardApp:
                 f"• Nombre: {est_existente.nombre}\n"
                 f"• Matrícula: {est_existente.matricula}\n"
                 f"• Carrera: {est_existente.carrera or 'Sin Carrera'}\n"
-                f"• Distancia L2: {dist:.4f} (<= 0.55)\n\n"
+                f"• Distancia L2: {dist:.4f} (<= {config.FACE_DISTANCE_THRESHOLD:.2f})\n\n"
                 f"No es necesario volver a registrarlo."
             )
             self.lbl_scan_result.config(
@@ -928,6 +1149,265 @@ class GuardApp:
     # -------------------------------------------------------------------------
     # GESTIÓN DE PADRÓN Y AUDITORÍA
     # -------------------------------------------------------------------------
+    # PESTAÑA 4: CONFIGURACIÓN DE CÁMARAS (ADMIN)
+    # -------------------------------------------------------------------------
+    def _build_tab_configuracion(self):
+        """Construye la interfaz de la pestaña de Configuración de Cámaras."""
+        main_box = tk.Frame(self.tab_configuracion, bg=self.COLOR_BG, padx=15, pady=15)
+        main_box.pack(fill=tk.BOTH, expand=True)
+
+        # Panel izquierdo: tabla de cámaras
+        left_panel = tk.Frame(main_box, bg=self.COLOR_PANEL)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
+
+        tk.Label(left_panel, text="CÁMARAS CONFIGURADAS", font=("Helvetica", 12, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(0, 8))
+
+        cols = ("id", "nombre", "ip", "usuario", "puerto", "ruta_rtsp", "activa")
+        self.tree_camaras = ttk.Treeview(left_panel, columns=cols, show="headings", height=12)
+        for col in cols:
+            self.tree_camaras.heading(col, text=col.upper())
+        self.tree_camaras.column("id", width=40, anchor=tk.CENTER)
+        self.tree_camaras.column("activa", width=60, anchor=tk.CENTER)
+        self.tree_camaras.pack(fill=tk.BOTH, expand=True)
+        self.tree_camaras.bind("<<TreeviewSelect>>", self._on_seleccionar_camara)
+
+        # Panel derecho: formulario de edición/creación
+        right_panel = tk.Frame(main_box, bg=self.COLOR_PANEL, width=350)
+        right_panel.pack(side=tk.RIGHT, fill=tk.Y)
+        right_panel.pack_propagate(False)
+
+        tk.Label(right_panel, text="Detalle de Cámara", font=("Helvetica", 12, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(pady=(0, 8))
+
+        form_frame = tk.Frame(right_panel, bg=self.COLOR_PANEL)
+        form_frame.pack(fill=tk.X, pady=4)
+
+        # Nombre
+        tk.Label(form_frame, text="Nombre:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=0, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_nombre = tk.Entry(form_frame)
+        self.ent_cam_nombre.grid(row=0, column=1, pady=2, sticky=tk.EW)
+        # IP
+        tk.Label(form_frame, text="IP:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_ip = tk.Entry(form_frame)
+        self.ent_cam_ip.grid(row=1, column=1, pady=2, sticky=tk.EW)
+        # Usuario
+        tk.Label(form_frame, text="Usuario:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=2, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_user = tk.Entry(form_frame)
+        self.ent_cam_user.grid(row=2, column=1, pady=2, sticky=tk.EW)
+        # Contraseña
+        tk.Label(form_frame, text="Contraseña:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=3, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_pass = tk.Entry(form_frame, show="*")
+        self.ent_cam_pass.grid(row=3, column=1, pady=2, sticky=tk.EW)
+        # Puerto
+        tk.Label(form_frame, text="Puerto:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=4, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_puerto = tk.Entry(form_frame)
+        self.ent_cam_puerto.grid(row=4, column=1, pady=2, sticky=tk.EW)
+        # Ruta RTSP
+        tk.Label(form_frame, text="Ruta RTSP:", fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).grid(row=5, column=0, sticky=tk.W, pady=2)
+        self.ent_cam_rtsp = tk.Entry(form_frame)
+        self.ent_cam_rtsp.grid(row=5, column=1, pady=2, sticky=tk.EW)
+        # Activa (checkbox)
+        self.var_cam_activa = tk.BooleanVar()
+        chk_activa = tk.Checkbutton(form_frame, text="Activa", variable=self.var_cam_activa, bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, selectcolor=self.COLOR_CARD)
+        chk_activa.grid(row=6, column=0, columnspan=2, pady=4)
+
+        for i in range(2):
+            form_frame.columnconfigure(i, weight=1)
+
+        # Botones de acción
+        btn_box = tk.Frame(right_panel, bg=self.COLOR_PANEL)
+        btn_box.pack(fill=tk.X, pady=12)
+
+        btn_guardar = tk.Button(btn_box, text="💾 Guardar", bg=self.COLOR_GREEN, fg="#ffffff", command=self._guardar_camara)
+        btn_guardar.pack(fill=tk.X, pady=2)
+        btn_actualizar = tk.Button(btn_box, text="🔄 Actualizar", bg=self.COLOR_ACCENT, fg="#ffffff", command=self._actualizar_camara_seleccionada)
+        btn_actualizar.pack(fill=tk.X, pady=2)
+        btn_eliminar = tk.Button(btn_box, text="🗑️ Eliminar", bg=self.COLOR_RED, fg="#ffffff", command=self._eliminar_camara_seleccionada)
+        btn_eliminar.pack(fill=tk.X, pady=2)
+        btn_test = tk.Button(btn_box, text="⚙️ Probar Conexión", bg=self.COLOR_CARD, fg=self.COLOR_TEXT, command=self._probar_conexion_camara)
+        btn_test.pack(fill=tk.X, pady=2)
+        btn_activar = tk.Button(btn_box, text="🚀 Activar", bg=self.COLOR_GOLD_ITSX, fg="#0F172A", command=self._activar_camara_seleccionada)
+        btn_activar.pack(fill=tk.X, pady=2)
+
+        # Cargar datos iniciales
+        self._cargar_tabla_camaras()
+
+    def _cargar_tabla_camaras(self):
+        """Recarga el Treeview con la lista de cámaras de la base de datos."""
+        for row in getattr(self, "tree_camaras", []).get_children():
+            self.tree_camaras.delete(row)
+        camaras = self.db.obtener_camaras()
+        for cam in camaras:
+            self.tree_camaras.insert("", tk.END, values=(cam.id, cam.nombre, cam.ip, cam.usuario, cam.puerto, cam.ruta_rtsp, "✅" if cam.activa else "❌"))
+
+    def _on_seleccionar_camara(self, event):
+        """Puebla el formulario con los datos de la cámara seleccionada."""
+        sel = self.tree_camaras.selection()
+        if not sel:
+            return
+        item = self.tree_camaras.item(sel[0])
+        vals = item["values"]
+        # vals corresponde a (id, nombre, ip, usuario, puerto, ruta_rtsp, activa)
+        self._camara_seleccionada_id = vals[0]
+        self.ent_cam_nombre.delete(0, tk.END); self.ent_cam_nombre.insert(0, vals[1])
+        self.ent_cam_ip.delete(0, tk.END); self.ent_cam_ip.insert(0, vals[2])
+        self.ent_cam_user.delete(0, tk.END); self.ent_cam_user.insert(0, vals[3])
+        # La contraseña no se almacena en texto plano, dejamos campo vacío.
+        self.ent_cam_pass.delete(0, tk.END)
+        self.ent_cam_puerto.delete(0, tk.END); self.ent_cam_puerto.insert(0, vals[4])
+        self.ent_cam_rtsp.delete(0, tk.END); self.ent_cam_rtsp.insert(0, vals[5])
+        self.var_cam_activa.set(vals[6] == "✅")
+
+    def _prompt_admin(self):
+        """Muestra el diálogo de confirmación de administrador y devuelve (usuario, password) o None."""
+        # Utilizamos el método de clase 'solicitar' que maneja la lógica modal y devuelve (autorizado, usuario, password)
+        autorizado, admin_user, admin_pass = ConfirmAdminDialog.solicitar(
+            parent=self.root,
+            db=self.db,
+            accion_titulo="Operación Administrativa",
+            mensaje_detalles="Se requiere confirmar credenciales de administrador para esta acción."
+        )
+        if autorizado and admin_user and admin_pass:
+            return admin_user, admin_pass
+        return None
+
+    def _guardar_camara(self):
+        """Guarda una nueva cámara después de validar credenciales de administrador."""
+        creds = self._prompt_admin()
+        if not creds:
+            messagebox.showwarning("Permiso", "Operación cancelada o sin credenciales de administrador.")
+            return
+        admin_user, admin_pass = creds
+        nombre = self.ent_cam_nombre.get().strip()
+        ip = self.ent_cam_ip.get().strip()
+        usuario = self.ent_cam_user.get().strip()
+        password = self.ent_cam_pass.get().strip()
+        puerto = int(self.ent_cam_puerto.get().strip() or 554)
+        ruta = self.ent_cam_rtsp.get().strip() or "/stream2"
+        activa = self.var_cam_activa.get()
+        cam_id, msg = self.db.guardar_camara(nombre, ip, usuario, password, puerto, ruta, activa, admin_user, admin_pass)
+        if cam_id:
+            messagebox.showinfo("Éxito", msg)
+            self._cargar_tabla_camaras()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def _actualizar_camara_seleccionada(self):
+        """Actualiza la cámara seleccionada en el árbol."""
+        if not hasattr(self, "_camara_seleccionada_id"):
+            messagebox.showwarning("Selección", "Primero seleccione una cámara de la tabla.")
+            return
+        creds = self._prompt_admin()
+        if not creds:
+            return
+        admin_user, admin_pass = creds
+        nombre = self.ent_cam_nombre.get().strip()
+        ip = self.ent_cam_ip.get().strip()
+        usuario = self.ent_cam_user.get().strip()
+        password = self.ent_cam_pass.get().strip()
+        puerto = int(self.ent_cam_puerto.get().strip() or 554)
+        ruta = self.ent_cam_rtsp.get().strip() or "/stream2"
+        activa = self.var_cam_activa.get()
+        ok, msg = self.db.actualizar_camara(
+            camara_id=self._camara_seleccionada_id,
+            nombre=nombre,
+            ip=ip,
+            usuario=usuario,
+            password_plana=password,
+            puerto=puerto,
+            ruta_rtsp=ruta,
+            activa=activa,
+            admin_username=admin_user,
+            admin_password=admin_pass
+        )
+        if ok:
+            messagebox.showinfo("Éxito", msg)
+            self._cargar_tabla_camaras()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def _eliminar_camara_seleccionada(self):
+        """Elimina la cámara seleccionada tras confirmación y credenciales de admin."""
+        if not hasattr(self, "_camara_seleccionada_id"):
+            messagebox.showwarning("Selección", "Primero seleccione una cámara.")
+            return
+        if not messagebox.askyesno("Confirmar", "¿Eliminar la cámara seleccionada?"):
+            return
+        creds = self._prompt_admin()
+        if not creds:
+            return
+        admin_user, admin_pass = creds
+        ok, msg = self.db.eliminar_camara(self._camara_seleccionada_id, admin_user, admin_pass)
+        if ok:
+            messagebox.showinfo("Éxito", msg)
+            self._cargar_tabla_camaras()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def _activar_camara_seleccionada(self):
+        """Marca la cámara seleccionada como activa y actualiza el streaming."""
+        if not hasattr(self, "_camara_seleccionada_id"):
+            messagebox.showwarning("Selección", "Primero seleccione una cámara.")
+            return
+        if not self.db.activar_camara(self._camara_seleccionada_id):
+            messagebox.showerror("Error", "No se pudo activar la cámara.")
+            return
+        # Recargar lista para reflejar cambio
+        self._cargar_tabla_camaras()
+        # Cambiar fuente de video en la aplicación
+        cam = self.db.obtener_camara_por_id(self._camara_seleccionada_id)
+        if cam:
+            self._cambiar_fuente_camara(cam.get_rtsp_url() if cam.ip not in ("0", "", "localhost_cam") else int(cam.ip), cam.nombre)
+            messagebox.showinfo("Activada", f"Cámara '{cam.nombre}' ahora es la activa.")
+
+    def _probar_conexion_camara(self):
+        """Prueba la conexión a la cámara usando la utilidad async y muestra el resultado."""
+        # Obtener datos del formulario (no se requieren credenciales admin para prueba)
+        ip = self.ent_cam_ip.get().strip()
+        puerto = int(self.ent_cam_puerto.get().strip() or 554)
+        ruta = self.ent_cam_rtsp.get().strip() or "/stream2"
+        user = self.ent_cam_user.get().strip()
+        pwd = self.ent_cam_pass.get().strip()
+        url = build_rtsp_url(ip, puerto, ruta, user, pwd) if ip and ip not in ("0", "") else ip
+        try:
+            import asyncio
+            resultado = asyncio.run(test_camera_connection_async(url))
+        except Exception as e:
+            resultado = f"Error al probar conexión: {e}"
+        messagebox.showinfo("Prueba de Conexión", resultado)
+
+    # -------------------------------------------------------------------------
+    # PESTAÑA 5: SEGURIDAD Y AUDITORÍA (ADMIN)
+    # -------------------------------------------------------------------------
+    def _build_tab_seguridad(self):
+        """Construye la interfaz de la pestaña de Seguridad y Auditoría (bitácora de eventos)."""
+        main_box = tk.Frame(self.tab_seguridad, bg=self.COLOR_BG, padx=15, pady=15)
+        main_box.pack(fill=tk.BOTH, expand=True)
+
+        toolbar = tk.Frame(main_box, bg=self.COLOR_BG)
+        toolbar.pack(fill=tk.X, pady=(0, 8))
+        tk.Label(toolbar, text="BITÁCORA DE AUDITORÍA", font=("Helvetica", 13, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG).pack(side=tk.LEFT)
+        btn_refresh = tk.Button(toolbar, text="🔄  Actualizar", font=("Helvetica", 10, "bold"), bg=self.COLOR_PANEL, fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2", command=self._cargar_auditoria)
+        btn_refresh.pack(side=tk.RIGHT, padx=5)
+
+        cols_aud = ("id", "usuario", "operacion", "entidad", "detalles", "resultado", "timestamp")
+        self.tree_auditoria = ttk.Treeview(main_box, columns=cols_aud, show="headings", height=20)
+        for col in cols_aud:
+            self.tree_auditoria.heading(col, text=col.upper())
+        self.tree_auditoria.column("id", width=40, anchor=tk.CENTER)
+        self.tree_auditoria.column("timestamp", width=150)
+        self.tree_auditoria.pack(fill=tk.BOTH, expand=True)
+
+        self._cargar_auditoria()
+
+    def _cargar_auditoria(self):
+        """Carga los últimos eventos de auditoría en el Treeview."""
+        for row in getattr(self, "tree_auditoria", []).get_children():
+            self.tree_auditoria.delete(row)
+        logs = self.db.obtener_bitacora_auditoria(limit=200)
+        for log in logs:
+            self.tree_auditoria.insert("", tk.END, values=(log.id, log.usuario, log.operacion, log.entidad, log.detalles, log.resultado, log.timestamp))
+
+    # -------------------------------------------------------------------------
     def _cargar_tablas_bitacora(self):
         for row in self.tree_accesos.get_children():
             self.tree_accesos.delete(row)
@@ -963,6 +1443,7 @@ class GuardApp:
 
     def _recargar_alumnos(self):
         self.estudiantes = self.db.get_all_active_estudiantes()
+        self.matcher.set_known_students(self.estudiantes)
         self.lbl_db_badge.config(
             text=f"🟢 EN LÍNEA | MOTOR: {config.DB_ENGINE.upper()} | PADRÓN: {len(self.estudiantes)} ALUMNOS"
         )
@@ -1002,6 +1483,10 @@ class GuardApp:
             messagebox.showerror("Error al Exportar", f"Ocurrió un error: {e}")
 
     def _on_tab_changed(self, event):
+        # Limpiar cachés de detección para no mostrar cajas/landmarks de otra pestaña
+        self._cache_acceso = []
+        self._cache_landmarks = []
+        self._cache_n_rostros_reg = 0
         if self.notebook.index(self.notebook.select()) == 2:
             self._cargar_tablas_bitacora()
 
