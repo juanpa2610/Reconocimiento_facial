@@ -153,29 +153,6 @@ class LoginDialog(tk.Toplevel):
         card = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID, padx=22, pady=16)
         card.pack(fill=tk.BOTH, expand=True)
 
-        # Botones de autocompletado rápido de rol
-        pills_frame = tk.Frame(card, bg=self.COLOR_PANEL)
-        pills_frame.pack(fill=tk.X, pady=(0, 10))
-
-        tk.Label(pills_frame, text="Acceso rápido:", font=("Helvetica", 8, "bold"),
-                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT, padx=(0, 6))
-
-        btn_fill_admin = tk.Button(
-            pills_frame, text="👑 Administrador", font=("Helvetica", 8, "bold"),
-            bg=self.COLOR_CARD, fg=self.COLOR_GOLD_ITSX, activebackground="#334155", activeforeground=self.COLOR_GOLD_ITSX,
-            relief=tk.FLAT, padx=9, pady=3, cursor="hand2",
-            command=lambda: self._set_user_pill("admin#ITSX26")
-        )
-        btn_fill_admin.pack(side=tk.LEFT, padx=3)
-
-        btn_fill_op = tk.Button(
-            pills_frame, text="👤 Operador", font=("Helvetica", 8, "bold"),
-            bg=self.COLOR_CARD, fg=self.COLOR_ACCENT, activebackground="#334155", activeforeground=self.COLOR_ACCENT,
-            relief=tk.FLAT, padx=9, pady=3, cursor="hand2",
-            command=lambda: self._set_user_pill("operador#ITSX26")
-        )
-        btn_fill_op.pack(side=tk.LEFT, padx=3)
-
         # Campo Usuario
         tk.Label(
             card, text="Nombre de Usuario Institucional:*", font=("Helvetica", 9, "bold"),
@@ -187,7 +164,6 @@ class LoginDialog(tk.Toplevel):
             insertbackground=self.COLOR_ACCENT, relief=tk.FLAT, bd=6
         )
         self.ent_user.pack(fill=tk.X, pady=(0, 10))
-        self.ent_user.insert(0, "admin#ITSX26")
 
         # Campo Contraseña
         tk.Label(
@@ -239,7 +215,7 @@ class LoginDialog(tk.Toplevel):
 
         # Nota de cumplimiento al pie
         tk.Label(
-            card, text="🔒 Cifrado Biométrico AES-GCM • ResNet-34 • Confidencial",
+            card, text="🔒 Cifrado Biométrico AES-256-GCM • ResNet-34 • LFPDPPP",
             font=("Helvetica", 7), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL
         ).pack(pady=(4, 0))
 
@@ -248,12 +224,7 @@ class LoginDialog(tk.Toplevel):
         self.ent_pass.bind("<Return>", lambda e: self._ejecutar_login())
         self.bind("<Escape>", lambda e: self._on_window_close())
 
-        self.ent_pass.focus_set()
-
-    def _set_user_pill(self, username: str):
-        self.ent_user.delete(0, tk.END)
-        self.ent_user.insert(0, username)
-        self.ent_pass.focus_set()
+        self.ent_user.focus_set()
 
     def _toggle_show_pass(self):
         self._show_pass = not self._show_pass
@@ -397,8 +368,6 @@ class ConfirmAdminDialog(tk.Toplevel):
         self.ent_admin_user.pack(fill=tk.X, pady=(0, 8))
         if self.default_user:
             self.ent_admin_user.insert(0, self.default_user)
-        else:
-            self.ent_admin_user.insert(0, "admin#ITSX26")
 
         tk.Label(
             form_card, text="Contraseña de Administrador:", font=("Helvetica", 9, "bold"),
@@ -682,8 +651,13 @@ class AvisoPrivacidadDialog(tk.Toplevel):
     de Datos Personales en Posesión de los Particulares (LFPDPPP).
     """
 
-    def __init__(self, parent):
+    def __init__(self, parent, on_accept=None, on_reject=None, matricula: str = "PROSPECTO", tipo_usuario: str = "Estudiante"):
         super().__init__(parent)
+        self.on_accept = on_accept
+        self.on_reject = on_reject
+        self.matricula = matricula
+        self.tipo_usuario = tipo_usuario
+
         self.title("Aviso de Privacidad Integral — ITSX")
         self.resizable(True, True)
         self.minsize(680, 600)
@@ -873,9 +847,9 @@ class AvisoPrivacidadDialog(tk.Toplevel):
                      "En cumplimiento del Artículo 13 de la LFPDPPP, los vectores biométricos "
                      "se protegen mediante cifrado simétrico autenticado antes de ser escritos "
                      "en la base de datos:"),
-                    ("bullet_verde", "✓  Algoritmo:  CTR-SHA256 con firma de autenticidad HMAC-SHA256"),
-                    ("bullet_verde", "✓  Clave derivada de forma segura por sesión (HKDF-Expand)"),
-                    ("bullet_verde", "✓  Sin posibilidad de lectura útil en caso de extracción física no autorizada"),
+                    ("bullet_verde", "✓  Algoritmo:  AES-256-GCM con autenticación criptográfica integrada"),
+                    ("bullet_verde", "✓  Nonces de 96 bits únicos por vector y clave derivada segura"),
+                    ("bullet_verde", "✓  Detección inmediata de alteraciones o manipulaciones no autorizadas (GCM Tag)"),
                 ]
             ),
             (
@@ -916,21 +890,191 @@ class AvisoPrivacidadDialog(tk.Toplevel):
 
         tk.Label(
             footer,
-            text="Al marcar 'Acepto el Aviso de Privacidad' en el formulario de registro, el titular otorga su consentimiento libre, informado y expreso.",
+            text="Conforme a la LFPDPPP, los datos biométricos requieren consentimiento expreso e informado. Puede otorgarlo o denegarlo a continuación.",
             font=("Helvetica", 8, "italic"),
             fg=self.MUTED, bg=self.PANEL,
-            wraplength=480, justify=tk.LEFT
+            wraplength=350, justify=tk.LEFT
         ).pack(side=tk.LEFT)
 
-        tk.Button(
-            footer,
-            text="  ✓  Entendido y Cerrar  ",
-            font=("Helvetica", 10, "bold"),
-            bg=self.GOLD, fg="#000000",
-            activebackground=self.GOLD_LIGHT, activeforeground="#000000",
-            relief=tk.FLAT, padx=14, pady=6,
-            cursor="hand2",
-            command=self.destroy
-        ).pack(side=tk.RIGHT)
+        if self.on_accept or self.on_reject:
+            btn_box = tk.Frame(footer, bg=self.PANEL)
+            btn_box.pack(side=tk.RIGHT)
+
+            if self.on_reject:
+                btn_rej = tk.Button(
+                    btn_box,
+                    text="✗ Denegar Consentimiento",
+                    font=("Helvetica", 10, "bold"),
+                    bg="#991B1B", fg="#ffffff",
+                    activebackground="#DC2626", activeforeground="#ffffff",
+                    relief=tk.FLAT, padx=12, pady=6, cursor="hand2",
+                    command=self._accion_rechazar
+                )
+                btn_rej.pack(side=tk.LEFT, padx=5)
+
+            if self.on_accept:
+                btn_acc = tk.Button(
+                    btn_box,
+                    text="✓ Aceptar y Otorgar",
+                    font=("Helvetica", 10, "bold"),
+                    bg="#059669", fg="#ffffff",
+                    activebackground="#10B981", activeforeground="#ffffff",
+                    relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+                    command=self._accion_aceptar
+                )
+                btn_acc.pack(side=tk.LEFT, padx=5)
+        else:
+            tk.Button(
+                footer,
+                text="  ✓  Entendido y Cerrar  ",
+                font=("Helvetica", 10, "bold"),
+                bg=self.GOLD, fg="#000000",
+                activebackground=self.GOLD_LIGHT, activeforeground="#000000",
+                relief=tk.FLAT, padx=14, pady=6,
+                cursor="hand2",
+                command=self.destroy
+            ).pack(side=tk.RIGHT)
+
+    def _accion_aceptar(self):
+        if self.on_accept:
+            self.on_accept()
+        self.destroy()
+
+    def _accion_rechazar(self):
+        if self.on_reject:
+            self.on_reject()
+        self.destroy()
+
+
+class PrimerInicioAdminDialog(tk.Toplevel):
+    """
+    Diálogo interactivo para crear las credenciales del Administrador Principal
+    en el primer arranque del sistema cuando la base de datos está vacía.
+    Evita credenciales fijas o hardcodeadas en repositorios públicos.
+    """
+    def __init__(self, parent, db):
+        super().__init__(parent)
+        self.db = db
+        self.creado = False
+
+        self.title("ITSX - Configuración de Primer Arranque (Administrador Inicial)")
+        self.geometry("480x520")
+        self.resizable(False, False)
+
+        self.COLOR_BG = "#0B1120"
+        self.COLOR_PANEL = "#151F32"
+        self.COLOR_CARD = "#1E293B"
+        self.COLOR_GOLD_ITSX = "#E5A823"
+        self.COLOR_GREEN = "#10B981"
+        self.COLOR_RED = "#EF4444"
+        self.COLOR_ACCENT = "#38BDF8"
+
+        self.configure(bg=self.COLOR_BG)
+        self.transient(parent)
+        self.grab_set()
+
+        self._build_ui()
+        self._center_window(parent)
+
+    def _center_window(self, parent):
+        self.update_idletasks()
+        try:
+            pw, ph, px, py = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
+        except Exception:
+            pw, ph, px, py = 1200, 800, 100, 100
+        w, h = 480, 520
+        x = px + max(0, (pw - w) // 2)
+        y = py + max(0, (ph - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _build_ui(self):
+        main = tk.Frame(self, bg=self.COLOR_BG, padx=24, pady=20)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            main, text="🛡️  CREACIÓN DE ADMINISTRADOR INICIAL",
+            font=("Helvetica", 12, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG
+        ).pack(anchor=tk.W, pady=(0, 4))
+
+        tk.Label(
+            main,
+            text="No se detectaron usuarios en el sistema. Defina la cuenta maestra de administración para comenzar.",
+            font=("Helvetica", 9), fg="#94A3B8", bg=self.COLOR_BG, wraplength=430, justify=tk.LEFT
+        ).pack(anchor=tk.W, pady=(0, 14))
+
+        card = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID, padx=18, pady=16)
+        card.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+        tk.Label(card, text="Nombre Completo del Administrador:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_nombre = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT)
+        self.ent_nombre.pack(fill=tk.X, pady=(2, 8))
+        self.ent_nombre.insert(0, "Administrador Principal ITSX")
+
+        tk.Label(card, text="Nombre de Usuario (Login):", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_user = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT)
+        self.ent_user.pack(fill=tk.X, pady=(2, 8))
+        self.ent_user.insert(0, "admin")
+
+        tk.Label(card, text="Nueva Contraseña:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_pass = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT, show="•")
+        self.ent_pass.pack(fill=tk.X, pady=(2, 8))
+
+        tk.Label(card, text="Confirmar Contraseña:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_pass_confirm = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT, show="•")
+        self.ent_pass_confirm.pack(fill=tk.X, pady=(2, 8))
+
+        self.lbl_error = tk.Label(card, text="", font=("Helvetica", 8, "bold"), fg=self.COLOR_RED, bg=self.COLOR_PANEL, wraplength=400)
+        self.lbl_error.pack(fill=tk.X, pady=(4, 0))
+
+        btn_save = tk.Button(
+            main, text="🚀  CREAR CUENTA Y ENTRAR", font=("Helvetica", 11, "bold"),
+            bg="#059669", fg="#ffffff", activebackground=self.COLOR_GREEN, activeforeground="#ffffff",
+            relief=tk.FLAT, pady=9, cursor="hand2", command=self._guardar_admin
+        )
+        btn_save.pack(fill=tk.X)
+
+    def _guardar_admin(self):
+        nombre = self.ent_nombre.get().strip()
+        user = self.ent_user.get().strip()
+        p1 = self.ent_pass.get()
+        p2 = self.ent_pass_confirm.get()
+
+        if not nombre or not user or not p1:
+            self.lbl_error.config(text="Todos los campos son obligatorios.")
+            return
+
+        if len(p1) < 6:
+            self.lbl_error.config(text="La contraseña debe tener al menos 6 caracteres.")
+            return
+
+        if p1 != p2:
+            self.lbl_error.config(text="Las contraseñas no coinciden.")
+            return
+
+        h = hash_password(p1)
+        try:
+            if self.db.engine == "postgres":
+                with self.db._get_postgres_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
+                            VALUES (%s, %s, %s, 'administrador', TRUE);
+                        """, (user, h, nombre))
+                        conn.commit()
+            else:
+                with self.db._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
+                        VALUES (?, ?, ?, 'administrador', 1);
+                    """, (user, h, nombre))
+                    conn.commit()
+            self.db.log_auditoria(user, "CREAR_USUARIO", "USUARIO", f"Administrador inicial '{user}' configurado.", "EXITO")
+            self.creado = True
+            messagebox.showinfo("Configuración Completa", f"¡Cuenta de Administrador '{user}' creada exitosamente! Ingrese con sus credenciales.")
+            self.destroy()
+        except Exception as e:
+            self.lbl_error.config(text=f"Error al guardar: {e}")
+
 
 

@@ -102,6 +102,22 @@ REQUIRED_BLINKS = int(os.getenv("REQUIRED_BLINKS", "1"))
 # -----------------------------------------------------------------------------
 # Criptografía y Protección en Reposo (LFPDPPP)
 # -----------------------------------------------------------------------------
-SECRET_KEY = os.getenv("SECRET_KEY", "ITSX-BIOMETRIC-SECURITY-KEY-2026")
+_env_secret = os.getenv("SECRET_KEY")
+if not _env_secret:
+    # Si no existe SECRET_KEY en .env, generar una clave criptográfica de 256 bits
+    import secrets
+    _env_secret = secrets.token_hex(32)
+    env_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        if os.path.exists(env_file):
+            with open(env_file, "a", encoding="utf-8") as _f:
+                _f.write(f"\nSECRET_KEY={_env_secret}\n")
+        else:
+            with open(env_file, "w", encoding="utf-8") as _f:
+                _f.write(f"SECRET_KEY={_env_secret}\n")
+    except Exception as _err:
+        pass
+
+SECRET_KEY = _env_secret
 ENCRYPT_BIOMETRICS = os.getenv("ENCRYPT_BIOMETRICS", "true").lower() in ("true", "1", "yes")
 

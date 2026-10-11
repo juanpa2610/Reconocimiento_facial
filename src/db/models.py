@@ -66,7 +66,7 @@ class Usuario:
     created_at: Optional[str] = None
 
     def es_admin(self) -> bool:
-        return self.rol.lower() == "administrador" and self.activo
+        return self.rol.lower() in ("administrador", "admin") and self.activo
 
 
 @dataclass

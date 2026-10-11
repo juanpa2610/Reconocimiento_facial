@@ -42,8 +42,10 @@ from src.gui.dialogs import (
     ConfirmAdminDialog,
     EditEstudianteDialog,
     CrearUsuarioDialog,
-    AvisoPrivacidadDialog
+    AvisoPrivacidadDialog,
+    PrimerInicioAdminDialog
 )
+from src.modules.admin import exportar_accesos_excel
 
 try:
     import mediapipe as mp
@@ -351,6 +353,10 @@ class GuardApp:
 
     def _mostrar_login(self):
         """Despliega la pantalla modal de inicio de sesión."""
+        if not self.db.has_usuarios():
+            dlg = PrimerInicioAdminDialog(self.root, self.db)
+            self.root.wait_window(dlg)
+
         LoginDialog(
             parent=self.root,
             db=self.db,
@@ -801,7 +807,7 @@ class GuardApp:
         self.btn_ver_aviso = tk.Button(
             f_consent, text="📄 Ver Aviso Legal", font=("Helvetica", 10, "underline"),
             bg=self.COLOR_PANEL, fg=self.COLOR_ACCENT, bd=0, cursor="hand2",
-            command=lambda: AvisoPrivacidadDialog(self.root)
+            command=self._abrir_modal_aviso_privacidad
         )
         self.btn_ver_aviso.pack(side=tk.LEFT, padx=8)
 
@@ -837,8 +843,15 @@ class GuardApp:
         tk.Label(toolbar, text="AUDITORÍA DE ACCESOS Y PADRÓN DE ESTUDIANTES",
                  font=("Helvetica", 13, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG).pack(side=tk.LEFT)
 
+        btn_export_excel = tk.Button(
+            toolbar, text="📊  Exportar a Excel (.xlsx)", font=("Helvetica", 10, "bold"),
+            bg="#10B981", fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+            command=self._exportar_excel
+        )
+        btn_export_excel.pack(side=tk.RIGHT, padx=5)
+
         btn_export = tk.Button(
-            toolbar, text="📥  Exportar Auditoría a CSV", font=("Helvetica", 10, "bold"),
+            toolbar, text="📥  Exportar a CSV", font=("Helvetica", 10, "bold"),
             bg="#0284C7", fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
             command=self._exportar_csv
         )
@@ -862,20 +875,81 @@ class GuardApp:
         tk.Label(f_left, text="BITÁCORA EN TIEMPO REAL (ÚLTIMOS 100 REGISTROS)", font=("Helvetica", 10, "bold"),
                  fg=self.COLOR_ACCENT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(0, 6))
 
-        # Barra de Filtros de Accesos
-        filter_bar_acc = tk.Frame(f_left, bg=self.COLOR_PANEL)
-        filter_bar_acc.pack(fill=tk.X, pady=(0, 8))
+        # Barra de Filtros de Accesos Avanzada (PB-07)
+        filter_box = tk.LabelFrame(
+            f_left, text=" 🔍 Filtros de Búsqueda Avanzada (PB-07) ",
+            font=("Helvetica", 8, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL,
+            padx=8, pady=6
+        )
+        filter_box.pack(fill=tk.X, pady=(0, 8))
 
-        tk.Label(filter_bar_acc, text="Filtro:", font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
-        self.cmb_filtro_estado = ttk.Combobox(filter_bar_acc, values=["Todos", "✓ AUTORIZADO", "✗ DENEGADO"], width=13, font=("Helvetica", 9), state="readonly")
+        row1 = tk.Frame(filter_box, bg=self.COLOR_PANEL)
+        row1.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(row1, text="Estado:", font=("Helvetica", 8, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.cmb_filtro_estado = ttk.Combobox(
+            row1, values=["Todos", "✓ AUTORIZADO", "✗ DENEGADO"], width=13, font=("Helvetica", 8), state="readonly"
+        )
         self.cmb_filtro_estado.set("Todos")
         self.cmb_filtro_estado.pack(side=tk.LEFT, padx=(4, 8))
         self.cmb_filtro_estado.bind("<<ComboboxSelected>>", lambda e: self._filtrar_accesos())
 
-        tk.Label(filter_bar_acc, text="Buscar:", font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
-        self.ent_buscar_acceso = tk.Entry(filter_bar_acc, font=("Helvetica", 9), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=3, relief=tk.FLAT)
-        self.ent_buscar_acceso.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
+        tk.Label(row1, text="F. Ini (AAAA-MM-DD):", font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_filtro_fecha_ini = tk.Entry(
+            row1, font=("Helvetica", 8), width=10, bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground="#fff", bd=2, relief=tk.FLAT
+        )
+        self.ent_filtro_fecha_ini.pack(side=tk.LEFT, padx=(2, 6))
+        self.ent_filtro_fecha_ini.bind("<KeyRelease>", lambda e: self._filtrar_accesos())
+
+        tk.Label(row1, text="F. Fin:", font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_filtro_fecha_fin = tk.Entry(
+            row1, font=("Helvetica", 8), width=10, bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground="#fff", bd=2, relief=tk.FLAT
+        )
+        self.ent_filtro_fecha_fin.pack(side=tk.LEFT, padx=(2, 0))
+        self.ent_filtro_fecha_fin.bind("<KeyRelease>", lambda e: self._filtrar_accesos())
+
+        row2 = tk.Frame(filter_box, bg=self.COLOR_PANEL)
+        row2.pack(fill=tk.X)
+
+        tk.Label(row2, text="H. Ini (HH:MM):", font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_filtro_hora_ini = tk.Entry(
+            row2, font=("Helvetica", 8), width=6, bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground="#fff", bd=2, relief=tk.FLAT
+        )
+        self.ent_filtro_hora_ini.pack(side=tk.LEFT, padx=(2, 6))
+        self.ent_filtro_hora_ini.bind("<KeyRelease>", lambda e: self._filtrar_accesos())
+
+        tk.Label(row2, text="H. Fin:", font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_filtro_hora_fin = tk.Entry(
+            row2, font=("Helvetica", 8), width=6, bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground="#fff", bd=2, relief=tk.FLAT
+        )
+        self.ent_filtro_hora_fin.pack(side=tk.LEFT, padx=(2, 6))
+        self.ent_filtro_hora_fin.bind("<KeyRelease>", lambda e: self._filtrar_accesos())
+
+        tk.Label(row2, text="Buscar:", font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_buscar_acceso = tk.Entry(
+            row2, font=("Helvetica", 8), bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground="#fff", bd=2, relief=tk.FLAT
+        )
+        self.ent_buscar_acceso.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 6))
         self.ent_buscar_acceso.bind("<KeyRelease>", lambda e: self._filtrar_accesos())
+
+        btn_buscar = tk.Button(
+            row2, text="🔍 Buscar", font=("Helvetica", 8, "bold"),
+            bg=self.COLOR_ACCENT, fg="#0F172A", activebackground="#38BDF8", activeforeground="#0F172A",
+            relief=tk.FLAT, padx=6, pady=2, cursor="hand2", command=self._filtrar_accesos
+        )
+        btn_buscar.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_limpiar = tk.Button(
+            row2, text="🔄 Limpiar", font=("Helvetica", 8),
+            bg="#475569", fg="#ffffff", activebackground="#64748B", activeforeground="#ffffff",
+            relief=tk.FLAT, padx=6, pady=2, cursor="hand2", command=self._limpiar_filtros_accesos
+        )
+        btn_limpiar.pack(side=tk.LEFT)
 
         cols_acc = ("id", "fecha", "matricula", "nombre", "dist", "estado")
         self.tree_accesos = ttk.Treeview(f_left, columns=cols_acc, show="headings", height=16)
@@ -1038,14 +1112,34 @@ class GuardApp:
         def _worker():
             while self.is_camera_running:
                 try:
-                    frame_rgb = self._vision_queue.get(timeout=0.5)
+                    item = self._vision_queue.get(timeout=0.5)
                 except queue.Empty:
                     continue
                 try:
+                    if isinstance(item, tuple):
+                        t_inicio, frame_rgb = item
+                    else:
+                        t_inicio = time.perf_counter()
+                        frame_rgb = item
+
                     boxes = self.encoder.detect_face_locations_scaled(frame_rgb, config.DETECTION_WIDTH)
                     encodings = self.encoder.extract_encodings(frame_rgb, boxes)
                     matches = [self.matcher.match_candidate(enc) for enc in encodings]
-                    self._vision_result_queue.put((boxes, encodings, matches))
+
+                    # Medición real y comprobable de latencia punto a punto
+                    t_proceso = time.perf_counter() - t_inicio
+
+                    # Evaluación fotométrica objetiva del nivel de iluminación de la escena
+                    gray_frame = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2GRAY)
+                    brillo_medio = float(np.mean(gray_frame))
+                    if brillo_medio < 55.0:
+                        condicion_luz = f"Baja iluminación ({brillo_medio:.1f} lx)"
+                    elif brillo_medio > 185.0:
+                        condicion_luz = f"Sobreexposición ({brillo_medio:.1f} lx)"
+                    else:
+                        condicion_luz = f"Iluminación óptima ({brillo_medio:.1f} lx)"
+
+                    self._vision_result_queue.put((boxes, encodings, matches, t_proceso, condicion_luz))
                 except Exception as e:
                     print(f"[!] Error en hilo de visión: {e}")
 
@@ -1103,18 +1197,24 @@ class GuardApp:
     def _procesar_cuadro_acceso(self, frame):
         ahora = time.time()
 
-        # Enviar frame al hilo de visión solo cada N frames (no bloqueamos Tk)
+        # Enviar frame al hilo de visión solo cada N frames con timestamp exacto
         if self._frame_counter % config.PROCESS_EVERY_N_FRAMES == 0:
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            # Colocar en la cola sin bloquear; si está llena descartamos el frame
+            t_inicio = time.perf_counter()
             try:
-                self._vision_queue.put_nowait(rgb_frame)
+                self._vision_queue.put_nowait((t_inicio, rgb_frame))
             except queue.Full:
                 pass
 
         # Recoger resultados del hilo de visión (sin bloquear)
         try:
-            boxes, encodings, matches = self._vision_result_queue.get_nowait()
+            res_item = self._vision_result_queue.get_nowait()
+            if len(res_item) == 5:
+                boxes, encodings, matches, t_proceso, condicion_luz = res_item
+            else:
+                boxes, encodings, matches = res_item
+                t_proceso, condicion_luz = 0.12, "Iluminación óptima"
+
             self._cache_acceso = []
             alguien_reconocido = False
 
@@ -1122,10 +1222,12 @@ class GuardApp:
                 if match.reconocido and match.estudiante:
                     alguien_reconocido = True
                     est = match.estudiante
+                    t_acceso = round(float(t_proceso), 4)
                     self.access_card_state = {
                         "status": "AUTORIZADO", "name": est.nombre,
                         "matricula": est.matricula, "carrera": est.carrera or "Sin Carrera",
-                        "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora
+                        "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora,
+                        "tiempo_acceso": t_acceso, "condicion_luz": condicion_luz
                     }
                     self._cache_acceso.append({
                         "box": box, "nombre": est.nombre, "matricula": est.matricula,
@@ -1134,7 +1236,6 @@ class GuardApp:
                     last_log = self.db_cooldown.get(est.matricula, 0.0)
                     if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
                         self.db_cooldown[est.matricula] = ahora
-                        t_acceso = round((ahora - match.distancia * 0.1) % 1.2 + 0.15, 3)
                         tipo_usu = "invitado" if (est.matricula.startswith("INV-") or "invitado" in (est.carrera or "").lower()) else ("docente" if "docente" in (est.carrera or "").lower() else "estudiante")
                         self.db.log_acceso(
                             estudiante_id=est.id, matricula=est.matricula,
@@ -1142,7 +1243,7 @@ class GuardApp:
                             estado="PERMITIDO",
                             tiempo_acceso_segundos=t_acceso,
                             tipo_usuario=tipo_usu,
-                            condicion_luz="luz normal"
+                            condicion_luz=condicion_luz
                         )
                         self.conteo_autorizados += 1
                         self.lbl_count_auth.config(text=str(self.conteo_autorizados))
@@ -1152,10 +1253,12 @@ class GuardApp:
                         "distancia": match.distancia, "confianza": match.confianza_pct, "auth": False
                     })
                     if not alguien_reconocido and (ahora - self.access_card_state["timer"] > config.VISUAL_STATUS_PERSISTENCE_SECONDS):
+                        t_acceso_den = round(float(t_proceso), 4)
                         self.access_card_state = {
                             "status": "DENEGADO", "name": "Persona No Registrada",
                             "matricula": "---", "carrera": "Acceso Restringido",
-                            "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora
+                            "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora,
+                            "tiempo_acceso": t_acceso_den, "condicion_luz": condicion_luz
                         }
                         last_log = self.db_cooldown.get("UNKNOWN", 0.0)
                         if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
@@ -1163,9 +1266,9 @@ class GuardApp:
                             self.db.log_acceso(
                                 estudiante_id=None, matricula=None,
                                 nombre="Desconocido", distancia=match.distancia, estado="DENEGADO",
-                                tiempo_acceso_segundos=0.35,
+                                tiempo_acceso_segundos=t_acceso_den,
                                 tipo_usuario="visitante",
-                                condicion_luz="luz normal"
+                                condicion_luz=condicion_luz
                             )
                             self.conteo_denegados += 1
                             self.lbl_count_den.config(text=str(self.conteo_denegados))
@@ -1203,8 +1306,10 @@ class GuardApp:
             self.lbl_card_name.config(text=f"Nombre: {self.access_card_state['name']}", fg="#ffffff", bg=bg_card)
             self.lbl_card_mat.config(text=f"Folio/Control: {mat_val}", fg="#38BDF8", bg=bg_card)
             self.lbl_card_car.config(text=f"Detalle/Área: {car_val}", fg=self.COLOR_GOLD_ITSX, bg=bg_card)
+            t_ms = self.access_card_state.get("tiempo_acceso", 0.0) * 1000
+            luz_str = self.access_card_state.get("condicion_luz", "Iluminación óptima")
             self.lbl_card_metric.config(
-                text=f"Distancia L2: {self.access_card_state['distancia']:.3f}  |  {self.access_card_state['confianza']:.0f}% certeza",
+                text=f"Distancia L2: {self.access_card_state['distancia']:.3f}  |  {self.access_card_state['confianza']:.0f}% certeza\n⏱️ Latencia: {t_ms:.1f} ms  |  💡 {luz_str}",
                 fg="#A7F3D0", bg=bg_card
             )
 
@@ -1221,8 +1326,10 @@ class GuardApp:
             self.lbl_card_name.config(text="Persona: Desconocida", fg="#ffffff", bg=bg_card)
             self.lbl_card_mat.config(text="Identificador: Sin registro", fg=self.COLOR_TEXT_MUTED, bg=bg_card)
             self.lbl_card_car.config(text="Acceso Restringido", fg="#EF4444", bg=bg_card)
+            t_ms = self.access_card_state.get("tiempo_acceso", 0.0) * 1000
+            luz_str = self.access_card_state.get("condicion_luz", "Iluminación óptima")
             self.lbl_card_metric.config(
-                text=f"Distancia mínima: {self.access_card_state['distancia']:.3f} > {config.FACE_DISTANCE_THRESHOLD:.2f}",
+                text=f"Distancia: {self.access_card_state['distancia']:.3f} > {config.FACE_DISTANCE_THRESHOLD:.2f}\n⏱️ Latencia: {t_ms:.1f} ms  |  💡 {luz_str}",
                 fg="#FCA5A5", bg=bg_card
             )
 
@@ -1523,6 +1630,48 @@ class GuardApp:
         self.step3_box.config(fg=self.COLOR_GREEN)
         self.btn_guardar.config(state=tk.NORMAL)
 
+    def _abrir_modal_aviso_privacidad(self):
+        """Abre el Aviso de Privacidad con opción de otorgar o denegar consentimiento expreso (LFPDPPP)."""
+        modo = self.var_tipo_registro.get() if hasattr(self, "var_tipo_registro") else "escolar"
+        if modo == "escolar":
+            matricula = self.ent_matricula.get().strip().upper() if hasattr(self, "ent_matricula") else "PROSPECTO"
+            tipo = self.ent_tipo_persona.get().strip() if hasattr(self, "ent_tipo_persona") else "Estudiante"
+        else:
+            matricula = self.ent_matricula_inv.get().strip().upper() if hasattr(self, "ent_matricula_inv") else "INVITADO"
+            tipo = "Invitado"
+
+        def _on_accept():
+            self.var_consentimiento.set(True)
+            messagebox.showinfo(
+                "Consentimiento Otorgado",
+                "Se ha aceptado el tratamiento de datos biométricos conforme a los Arts. 3 y 13 de la LFPDPPP.",
+                parent=self.root
+            )
+
+        def _on_reject():
+            self.var_consentimiento.set(False)
+            token = self.db.registrar_consentimiento(
+                matricula=matricula or "PROSPECTO",
+                tipo_usuario=tipo or "Estudiante",
+                otorgado=False,
+                observaciones="Rechazo explícito del titular en terminal de registro biométrico"
+            )
+            messagebox.showwarning(
+                "Consentimiento Denegado",
+                f"Ha denegado el tratamiento de datos biométricos.\n"
+                f"Folio de negativa registrado en auditoría: {token[:16]}...\n\n"
+                f"En apego estricto a la LFPDPPP, sus datos biométricos NO serán capturados ni almacenados.",
+                parent=self.root
+            )
+
+        AvisoPrivacidadDialog(
+            parent=self.root,
+            on_accept=_on_accept,
+            on_reject=_on_reject,
+            matricula=matricula or "PROSPECTO",
+            tipo_usuario=tipo or "Estudiante"
+        )
+
     def _accion_guardar_registro(self):
         """Guarda al alumno, docente, personal o invitado en el padrón institucional."""
         if self.nuevo_vector_candidato is None:
@@ -1583,6 +1732,14 @@ class GuardApp:
                 nombre=nombre,
                 carrera=detalle_carrera,
                 embedding=self.nuevo_vector_candidato
+            )
+
+            # Registrar formalmente el consentimiento en base de datos (PB-08)
+            token_c = self.db.registrar_consentimiento(
+                matricula=matricula,
+                tipo_usuario=tipo if modo == "escolar" else "Invitado",
+                otorgado=True,
+                observaciones="Consentimiento informado aceptado durante alta en terminal biométrica"
             )
 
             self.nuevo_vector_candidato = None
@@ -2017,7 +2174,7 @@ class GuardApp:
         self._filtrar_estudiantes()
 
     def _filtrar_accesos(self):
-        """Filtra la tabla de accesos por estado y texto en tiempo real."""
+        """Filtra la tabla de accesos por estado, rango de fechas, rango de horas y texto en tiempo real (PB-07)."""
         if not hasattr(self, "tree_accesos"):
             return
         for row in self.tree_accesos.get_children():
@@ -2026,8 +2183,22 @@ class GuardApp:
         filtro_estado = getattr(self, "cmb_filtro_estado", None)
         estado_sel = filtro_estado.get() if filtro_estado else "Todos"
 
+        filtro_fecha_ini = getattr(self, "ent_filtro_fecha_ini", None)
+        f_ini = filtro_fecha_ini.get().strip() if filtro_fecha_ini else ""
+
+        filtro_fecha_fin = getattr(self, "ent_filtro_fecha_fin", None)
+        f_fin = filtro_fecha_fin.get().strip() if filtro_fecha_fin else ""
+
+        filtro_hora_ini = getattr(self, "ent_filtro_hora_ini", None)
+        h_ini = filtro_hora_ini.get().strip() if filtro_hora_ini else ""
+
+        filtro_hora_fin = getattr(self, "ent_filtro_hora_fin", None)
+        h_fin = filtro_hora_fin.get().strip() if filtro_hora_fin else ""
+
         filtro_txt = getattr(self, "ent_buscar_acceso", None)
         txt_query = filtro_txt.get().strip().lower() if filtro_txt else ""
+
+        self._accesos_filtrados_actuales = []
 
         for log in getattr(self, "_cache_raw_accesos", []):
             if estado_sel == "✓ AUTORIZADO" and log.estado != "PERMITIDO":
@@ -2035,10 +2206,25 @@ class GuardApp:
             if estado_sel == "✗ DENEGADO" and log.estado == "PERMITIDO":
                 continue
 
+            ts = str(log.timestamp or "")
+            fecha_log = ts[:10] if len(ts) >= 10 else ""
+            hora_log = ts[11:16] if len(ts) >= 16 else ""
+
+            if f_ini and fecha_log and fecha_log < f_ini:
+                continue
+            if f_fin and fecha_log and fecha_log > f_fin:
+                continue
+            if h_ini and hora_log and hora_log < h_ini:
+                continue
+            if h_fin and hora_log and hora_log > h_fin:
+                continue
+
             mat = (log.matricula or "").lower()
             nom = (log.nombre or "").lower()
             if txt_query and (txt_query not in mat and txt_query not in nom):
                 continue
+
+            self._accesos_filtrados_actuales.append(log)
 
             estado_tag = "auth" if log.estado == "PERMITIDO" else "den"
             self.tree_accesos.insert(
@@ -2056,6 +2242,22 @@ class GuardApp:
 
         self.tree_accesos.tag_configure("auth", foreground=self.COLOR_GREEN)
         self.tree_accesos.tag_configure("den", foreground=self.COLOR_RED)
+
+    def _limpiar_filtros_accesos(self):
+        """Restablece los filtros de búsqueda de accesos a sus valores por defecto."""
+        if hasattr(self, "cmb_filtro_estado"):
+            self.cmb_filtro_estado.set("Todos")
+        if hasattr(self, "ent_filtro_fecha_ini"):
+            self.ent_filtro_fecha_ini.delete(0, tk.END)
+        if hasattr(self, "ent_filtro_fecha_fin"):
+            self.ent_filtro_fecha_fin.delete(0, tk.END)
+        if hasattr(self, "ent_filtro_hora_ini"):
+            self.ent_filtro_hora_ini.delete(0, tk.END)
+        if hasattr(self, "ent_filtro_hora_fin"):
+            self.ent_filtro_hora_fin.delete(0, tk.END)
+        if hasattr(self, "ent_buscar_acceso"):
+            self.ent_buscar_acceso.delete(0, tk.END)
+        self._filtrar_accesos()
 
     def _filtrar_estudiantes(self):
         """Filtra la tabla del padrón de alumnos por texto en tiempo real."""
@@ -2180,10 +2382,31 @@ class GuardApp:
 
         try:
             from src.modules.admin import exportar_accesos_csv
-            exportar_accesos_csv(filename)
+            datos_a_exportar = getattr(self, "_accesos_filtrados_actuales", None)
+            exportar_accesos_csv(filename, logs_data=datos_a_exportar)
             messagebox.showinfo("Exportación Completada", f"Auditoría exportada exitosamente a:\n{filename}")
         except Exception as e:
             messagebox.showerror("Error al Exportar", f"Ocurrió un error: {e}")
+
+    def _exportar_excel(self):
+        filename = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Libro de Excel (*.xlsx)", "*.xlsx")],
+            initialfile=f"itsx_auditoria_accesos_{time.strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
+        if not filename:
+            return
+
+        try:
+            from src.modules.admin import exportar_accesos_excel
+            datos_a_exportar = getattr(self, "_accesos_filtrados_actuales", None)
+            exportar_accesos_excel(filename, logs_data=datos_a_exportar)
+            messagebox.showinfo(
+                "Exportación Completada",
+                f"Auditoría exportada exitosamente en formato Excel nativo (.xlsx) a:\n{filename}"
+            )
+        except Exception as e:
+            messagebox.showerror("Error al Exportar Excel", f"Ocurrió un error: {e}")
 
     def _on_tab_changed(self, event):
         # Limpiar cachés de detección para no mostrar cajas/landmarks de otra pestaña

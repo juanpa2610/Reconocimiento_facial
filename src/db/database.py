@@ -18,6 +18,10 @@ import numpy as np
 from typing import List, Optional, Tuple, Dict
 from datetime import datetime
 import os
+import json
+import time
+import secrets
+import hashlib
 
 import config
 from src.db.models import Estudiante, RegistroAcceso, Usuario, CamaraConfig, RegistroAuditoria
@@ -41,6 +45,91 @@ class Database:
     def __init__(self):
         self.engine = config.DB_ENGINE
         self.sqlite_path = config.SQLITE_DB_PATH
+        self._offline_access_buffer: List[Dict] = []
+        self._offline_buffer_file = os.path.join(
+            os.path.dirname(os.path.abspath(self.sqlite_path)) or ".",
+            "offline_access_buffer.json"
+        )
+        self._load_offline_buffer_from_disk()
+
+    def _save_offline_buffer_to_disk(self):
+        try:
+            with open(self._offline_buffer_file, "w", encoding="utf-8") as f:
+                json.dump(self._offline_access_buffer, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[!] Error al persistir buffer offline a disco: {e}")
+
+    def _load_offline_buffer_from_disk(self):
+        if os.path.exists(self._offline_buffer_file):
+            try:
+                with open(self._offline_buffer_file, "r", encoding="utf-8") as f:
+                    self._offline_access_buffer = json.load(f)
+            except Exception as e:
+                print(f"[!] Error al cargar buffer offline desde disco: {e}")
+                self._offline_access_buffer = []
+
+    def flush_offline_records(self) -> int:
+        """
+        PB-06-03: Inserta en la base de datos oficial los eventos retenidos
+        en buffer temporal durante desconexiones previas.
+        """
+        if not getattr(self, "_offline_access_buffer", None):
+            return 0
+
+        pending = list(self._offline_access_buffer)
+        flushed_count = 0
+        remaining = []
+
+        for item in pending:
+            try:
+                if self.engine == "postgres":
+                    with self._get_postgres_connection() as conn:
+                        with conn.cursor() as cursor:
+                            cursor.execute("""
+                                INSERT INTO registro_accesos (
+                                    estudiante_id, matricula, nombre, distancia, estado,
+                                    tiempo_acceso_segundos, tipo_usuario, condicion_luz, timestamp
+                                )
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s);
+                            """, (
+                                item.get("estudiante_id"), item.get("matricula"), item.get("nombre"),
+                                float(item.get("distancia", 0.0)), item.get("estado", "DESCONOCIDO"),
+                                float(item.get("tiempo_acceso_segundos", 0.0)), item.get("tipo_usuario", "visitante"),
+                                item.get("condicion_luz", "luz normal"), item.get("timestamp")
+                            ))
+                            conn.commit()
+                else:
+                    with self._get_sqlite_connection() as conn:
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            INSERT INTO registro_accesos (
+                                estudiante_id, matricula, nombre, distancia, estado,
+                                tiempo_acceso_segundos, tipo_usuario, condicion_luz, timestamp
+                            )
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+                        """, (
+                            item.get("estudiante_id"), item.get("matricula"), item.get("nombre"),
+                            float(item.get("distancia", 0.0)), item.get("estado", "DESCONOCIDO"),
+                            float(item.get("tiempo_acceso_segundos", 0.0)), item.get("tipo_usuario", "visitante"),
+                            item.get("condicion_luz", "luz normal"), item.get("timestamp")
+                        ))
+                        conn.commit()
+                flushed_count += 1
+            except Exception:
+                remaining.append(item)
+
+        self._offline_access_buffer = remaining
+        if not remaining and os.path.exists(self._offline_buffer_file):
+            try:
+                os.remove(self._offline_buffer_file)
+            except Exception:
+                pass
+        else:
+            self._save_offline_buffer_to_disk()
+
+        if flushed_count > 0:
+            print(f"[*] PB-06-03: Sincronizados exitosamente {flushed_count} registros de contingencia offline.")
+        return flushed_count
 
     def _get_sqlite_connection(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.sqlite_path)
@@ -67,6 +156,8 @@ class Database:
 
         self._seed_default_users()
         self._seed_default_cameras()
+        # PB-06-03: Sincronizar eventos retenidos en contingencia offline previa
+        self.flush_offline_records()
 
     def _init_sqlite(self):
         with self._get_sqlite_connection() as conn:
@@ -147,6 +238,19 @@ class Database:
                     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            # 6. Tabla de Consentimientos Informados (PB-08 / LFPDPPP)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS consentimientos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    matricula TEXT NOT NULL,
+                    tipo_usuario TEXT NOT NULL,
+                    firma_token TEXT NOT NULL,
+                    consentimiento_otorgado INTEGER NOT NULL,
+                    fecha_firma TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    ip_terminal TEXT DEFAULT 'LOCAL-STATION-01',
+                    observaciones TEXT
+                )
+            """)
             conn.commit()
 
     def _init_postgres(self):
@@ -221,6 +325,18 @@ class Database:
                         timestamp TIMESTAMPTZ DEFAULT NOW()
                     );
                 """)
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS consentimientos (
+                        id SERIAL PRIMARY KEY,
+                        matricula VARCHAR(50) NOT NULL,
+                        tipo_usuario VARCHAR(50) NOT NULL,
+                        firma_token VARCHAR(128) NOT NULL,
+                        consentimiento_otorgado INTEGER NOT NULL,
+                        fecha_firma TIMESTAMPTZ DEFAULT NOW(),
+                        ip_terminal VARCHAR(50) DEFAULT 'LOCAL-STATION-01',
+                        observaciones TEXT
+                    );
+                """)
                 conn.commit()
 
     # -------------------------------------------------------------------------
@@ -228,17 +344,19 @@ class Database:
     # -------------------------------------------------------------------------
     def _seed_default_users(self):
         """
-        Crea el usuario administrador y operador iniciales si no existen usuarios registrados.
-        Las credenciales se leen desde el archivo .env (ADMIN_USER / ADMIN_PASS).
-        Si no están definidas en .env se usan los valores predeterminados de primera instalación.
+        Crea usuarios iniciales solo si están expresamente definidos en .env
+        y la base de datos no contiene usuarios previos. No contiene contraseñas fijas en código.
         """
-        admin_user = os.getenv("ADMIN_USER", "admin#ITSX26")
-        admin_pass = os.getenv("ADMIN_PASS", "Admin#2026ITSX")
-        admin_name = os.getenv("ADMIN_NAME", "Administrador Principal ITSX")
+        admin_user = os.getenv("ADMIN_USER")
+        admin_pass = os.getenv("ADMIN_PASS")
+        admin_name = os.getenv("ADMIN_NAME", "Administrador Principal")
 
-        operador_user = os.getenv("OPERADOR_USER", "operador#ITSX26")
-        operador_pass = os.getenv("OPERADOR_PASS", "Operador#2026ITSX")
-        operador_name = os.getenv("OPERADOR_NAME", "Operador de Guardia ITSX")
+        operador_user = os.getenv("OPERADOR_USER")
+        operador_pass = os.getenv("OPERADOR_PASS")
+        operador_name = os.getenv("OPERADOR_NAME", "Operador de Guardia")
+
+        if not admin_user or not admin_pass:
+            return
 
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
@@ -247,14 +365,18 @@ class Database:
                     count = cursor.fetchone()[0]
                     if count == 0:
                         h_admin = hash_password(admin_pass)
-                        h_oper = hash_password(operador_pass)
                         cursor.execute("""
                             INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                            VALUES (%s, %s, %s, 'administrador', TRUE),
-                                   (%s, %s, %s, 'operador', TRUE);
-                        """, (admin_user, h_admin, admin_name, operador_user, h_oper, operador_name))
+                            VALUES (%s, %s, %s, 'administrador', TRUE);
+                        """, (admin_user, h_admin, admin_name))
+                        if operador_user and operador_pass:
+                            h_oper = hash_password(operador_pass)
+                            cursor.execute("""
+                                INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
+                                VALUES (%s, %s, %s, 'operador', TRUE);
+                            """, (operador_user, h_oper, operador_name))
                         conn.commit()
-                        self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde configuración", "EXITO")
+                        self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde .env", "EXITO")
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
@@ -262,14 +384,123 @@ class Database:
                 count = cursor.fetchone()[0]
                 if count == 0:
                     h_admin = hash_password(admin_pass)
-                    h_oper = hash_password(operador_pass)
                     cursor.execute("""
                         INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                        VALUES (?, ?, ?, 'administrador', 1),
-                               (?, ?, ?, 'operador', 1)
-                    """, (admin_user, h_admin, admin_name, operador_user, h_oper, operador_name))
+                        VALUES (?, ?, ?, 'administrador', 1);
+                    """, (admin_user, h_admin, admin_name))
+                    if operador_user and operador_pass:
+                        h_oper = hash_password(operador_pass)
+                        cursor.execute("""
+                            INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
+                            VALUES (?, ?, ?, 'operador', 1);
+                        """, (operador_user, h_oper, operador_name))
                     conn.commit()
-                    self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde configuración", "EXITO")
+                    self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde .env", "EXITO")
+
+    def count_usuarios(self) -> int:
+        """Retorna la cantidad total de usuarios registrados en el sistema."""
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("SELECT COUNT(*) FROM usuarios;")
+                    return int(cursor.fetchone()[0])
+        else:
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM usuarios;")
+                return int(cursor.fetchone()[0])
+
+    def has_usuarios(self) -> bool:
+        """Indica si existe al menos un usuario registrado en el sistema."""
+        return self.count_usuarios() > 0
+
+    def registrar_consentimiento(
+        self,
+        matricula: str,
+        tipo_usuario: str,
+        otorgado: bool,
+        token: Optional[str] = None,
+        observaciones: Optional[str] = None
+    ) -> str:
+        """
+        Registra la aceptación o rechazo explícito del tratamiento biométrico según LFPDPPP (PB-08).
+        Genera un token criptográfico inmutable de constancia legal.
+        """
+        if not token:
+            ts = time.time()
+            raw_token = f"{matricula}:{1 if otorgado else 0}:{ts}:{secrets.token_hex(8)}"
+            token = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+        otorgado_int = 1 if otorgado else 0
+        obs = observaciones or ("Consentimiento otorgado por titular (LFPDPPP)" if otorgado else "Consentimiento RECHAZADO / REVOCADO por titular (LFPDPPP)")
+
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        INSERT INTO consentimientos (
+                            matricula, tipo_usuario, firma_token, consentimiento_otorgado, observaciones
+                        )
+                        VALUES (%s, %s, %s, %s, %s);
+                    """, (matricula, tipo_usuario, token, otorgado_int, obs))
+                    conn.commit()
+        else:
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO consentimientos (
+                        matricula, tipo_usuario, firma_token, consentimiento_otorgado, observaciones
+                    )
+                    VALUES (?, ?, ?, ?, ?);
+                """, (matricula, tipo_usuario, token, otorgado_int, obs))
+                conn.commit()
+
+        self.log_auditoria(
+            "USUARIO",
+            "CONSENTIMIENTO_LFPDPPP",
+            "BIOMETRIA",
+            f"Consentimiento {'OTORGADO' if otorgado else 'RECHAZADO'} para matrícula {matricula} (Token: {token[:12]}...)",
+            "EXITO"
+        )
+        return token
+
+    def consultar_consentimiento(self, matricula: str) -> Optional[dict]:
+        """Consulta el estado del último consentimiento registrado para una matrícula."""
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute("""
+                        SELECT id, matricula, tipo_usuario, firma_token, consentimiento_otorgado, fecha_firma, observaciones
+                        FROM consentimientos
+                        WHERE matricula = %s
+                        ORDER BY id DESC LIMIT 1;
+                    """, (matricula,))
+                    row = cursor.fetchone()
+                    if row:
+                        return {
+                            "id": row[0], "matricula": row[1], "tipo_usuario": row[2],
+                            "firma_token": row[3], "token_consentimiento": row[3],
+                            "consentimiento_otorgado": bool(row[4]),
+                            "fecha_firma": str(row[5]), "observaciones": row[6]
+                        }
+        else:
+            with self._get_sqlite_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT id, matricula, tipo_usuario, firma_token, consentimiento_otorgado, fecha_firma, observaciones
+                    FROM consentimientos
+                    WHERE matricula = ?
+                    ORDER BY id DESC LIMIT 1;
+                """, (matricula,))
+                row = cursor.fetchone()
+                if row:
+                    return {
+                        "id": row["id"], "matricula": row["matricula"], "tipo_usuario": row["tipo_usuario"],
+                        "firma_token": row["firma_token"], "token_consentimiento": row["firma_token"],
+                        "consentimiento_otorgado": bool(row["consentimiento_otorgado"]),
+                        "fecha_firma": str(row["fecha_firma"]), "observaciones": row["observaciones"]
+                    }
+        return None
 
     def _seed_default_cameras(self):
         """Siembra la cámara Tapo C310 inicial o dispositivo local si no hay cámaras configuradas."""
@@ -340,6 +571,15 @@ class Database:
             )
         return None
 
+    def verificar_credenciales(self, username: Optional[str], password: Optional[str]) -> Tuple[bool, Optional[Usuario], str]:
+        """Valida credenciales de cualquier usuario retornando (ok, usuario, mensaje)."""
+        if not username or not password:
+            return False, None, "Debe ingresar usuario y contraseña."
+        user = self.autenticar_usuario(username, password)
+        if user:
+            return True, user, "Autenticación exitosa."
+        return False, None, "Usuario o contraseña incorrecta."
+
     def verificar_credenciales_admin(self, username: Optional[str], password: Optional[str]) -> Tuple[bool, Optional[Usuario], str]:
         """
         Verifica si las credenciales provistas corresponden a un usuario con rol 'administrador' activo.
@@ -352,7 +592,7 @@ class Database:
             return False, None, "Credenciales de administrador incorrectas."
 
         if not user.es_admin():
-            return False, user, "Acceso denegado: El usuario no cuenta con rol de Administrador."
+            return False, None, "Acceso denegado: El usuario no cuenta con rol de Administrador."
 
         return True, user, "Credenciales de administrador válidas."
 
@@ -766,8 +1006,7 @@ class Database:
         """Reconstruye el arreglo NumPy de 128 flotantes desde su representación binaria (descifra si está cifrado)."""
         if isinstance(data, memoryview):
             data = data.tobytes()
-        if data.startswith(b"ENC1$"):
-            data = decrypt_vector_bytes(data)
+        data = decrypt_vector_bytes(data)
         vec = np.frombuffer(data, dtype=np.float64)
         if vec.shape != (128,):
             raise ValueError(f"Formato inválido al deserializar vector: esperado (128,), obtenido {vec.shape}")
@@ -781,10 +1020,20 @@ class Database:
         raw_bytes = self.serialize_vector(embedding)
         vector_bytes = encrypt_vector_bytes(raw_bytes) if getattr(config, "ENCRYPT_BIOMETRICS", True) else raw_bytes
 
-        # Verificar duplicado antes de insertar
+        # Verificar duplicado de matrícula antes de insertar
         existente = self.get_estudiante_by_matricula(matricula)
         if existente:
             raise ValueError(f"La matrícula '{matricula}' ya está registrada en el padrón. Use 'Editar' para modificar datos.")
+
+        # Verificar duplicado biométrico previo
+        activos = self.get_all_active_estudiantes()
+        for e in activos:
+            dist = float(np.linalg.norm(e.embedding - embedding))
+            if dist <= config.FACE_DISTANCE_THRESHOLD:
+                raise ValueError(
+                    f"Similitud biométrica detectada ({dist:.3f} <= {config.FACE_DISTANCE_THRESHOLD}). "
+                    f"El rostro ya pertenece a '{e.nombre}' ({e.matricula})."
+                )
 
         try:
             if self.engine == "postgres":
@@ -1050,62 +1299,100 @@ class Database:
         tipo_usuario: str = "estudiante",
         condicion_luz: str = "luz normal"
     ) -> RegistroAcceso:
-        """Registra un evento de acceso en la bitácora de auditoría con métricas científicas."""
-        if self.engine == "postgres":
-            with self._get_postgres_connection() as conn:
-                with conn.cursor() as cursor:
+        """
+        Registra un evento de acceso en la bitácora de auditoría con métricas científicas.
+        Implementa PB-06-03: si ocurre una falla en BD, almacena en buffer offline y no pierde el evento.
+        """
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            # Reintentar vaciar registros retenidos si la BD está accesible
+            if getattr(self, "_offline_access_buffer", None):
+                self.flush_offline_records()
+
+            if self.engine == "postgres":
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("""
+                            INSERT INTO registro_accesos (
+                                estudiante_id, matricula, nombre, distancia, estado,
+                                tiempo_acceso_segundos, tipo_usuario, condicion_luz
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            RETURNING id, timestamp;
+                        """, (
+                            estudiante_id, matricula, nombre, float(distancia), estado,
+                            float(tiempo_acceso_segundos), tipo_usuario, condicion_luz
+                        ))
+                        res = cursor.fetchone()
+                        conn.commit()
+                        return RegistroAcceso(
+                            id=res[0],
+                            estudiante_id=estudiante_id,
+                            matricula=matricula,
+                            nombre=nombre,
+                            distancia=distancia,
+                            estado=estado,
+                            timestamp=str(res[1]),
+                            tiempo_acceso_segundos=float(tiempo_acceso_segundos),
+                            tipo_usuario=tipo_usuario,
+                            condicion_luz=condicion_luz
+                        )
+            else:
+                with self._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
                     cursor.execute("""
                         INSERT INTO registro_accesos (
                             estudiante_id, matricula, nombre, distancia, estado,
                             tiempo_acceso_segundos, tipo_usuario, condicion_luz
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        RETURNING id, timestamp;
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
                     """, (
                         estudiante_id, matricula, nombre, float(distancia), estado,
                         float(tiempo_acceso_segundos), tipo_usuario, condicion_luz
                     ))
-                    res = cursor.fetchone()
                     conn.commit()
+                    last_id = cursor.lastrowid
                     return RegistroAcceso(
-                        id=res[0],
+                        id=last_id,
                         estudiante_id=estudiante_id,
                         matricula=matricula,
                         nombre=nombre,
                         distancia=distancia,
                         estado=estado,
-                        timestamp=str(res[1]),
+                        timestamp=now_str,
                         tiempo_acceso_segundos=float(tiempo_acceso_segundos),
                         tipo_usuario=tipo_usuario,
                         condicion_luz=condicion_luz
                     )
-        else:
-            with self._get_sqlite_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO registro_accesos (
-                        estudiante_id, matricula, nombre, distancia, estado,
-                        tiempo_acceso_segundos, tipo_usuario, condicion_luz
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
-                """, (
-                    estudiante_id, matricula, nombre, float(distancia), estado,
-                    float(tiempo_acceso_segundos), tipo_usuario, condicion_luz
-                ))
-                conn.commit()
-                last_id = cursor.lastrowid
-                return RegistroAcceso(
-                    id=last_id,
-                    estudiante_id=estudiante_id,
-                    matricula=matricula,
-                    nombre=nombre,
-                    distancia=distancia,
-                    estado=estado,
-                    timestamp=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    tiempo_acceso_segundos=float(tiempo_acceso_segundos),
-                    tipo_usuario=tipo_usuario,
-                    condicion_luz=condicion_luz
-                )
+        except Exception as db_err:
+            print(f"[!] PB-06-03: Falla de base de datos ({db_err}). Almacenando en buffer offline temporal...")
+            entry = {
+                "estudiante_id": estudiante_id,
+                "matricula": matricula,
+                "nombre": nombre,
+                "distancia": float(distancia),
+                "estado": estado,
+                "tiempo_acceso_segundos": float(tiempo_acceso_segundos),
+                "tipo_usuario": tipo_usuario,
+                "condicion_luz": condicion_luz,
+                "timestamp": now_str
+            }
+            if not hasattr(self, "_offline_access_buffer"):
+                self._offline_access_buffer = []
+            self._offline_access_buffer.append(entry)
+            self._save_offline_buffer_to_disk()
+            return RegistroAcceso(
+                id=-1,
+                estudiante_id=estudiante_id,
+                matricula=matricula,
+                nombre=nombre,
+                distancia=distancia,
+                estado=estado,
+                timestamp=now_str,
+                tiempo_acceso_segundos=float(tiempo_acceso_segundos),
+                tipo_usuario=tipo_usuario,
+                condicion_luz=condicion_luz
+            )
 
     def get_recent_accesos(self, limit: int = 50) -> List[RegistroAcceso]:
         """Obtiene los últimos accesos registrados con métricas completas."""
