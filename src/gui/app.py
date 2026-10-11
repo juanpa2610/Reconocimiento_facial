@@ -829,15 +829,15 @@ class GuardApp:
                 )
                 return
             self.is_camera_running = True
-        if hasattr(self, "lbl_gate_name"):
-            self.lbl_gate_name.config(text=f"SENSOR: {self.nombre_camara_activa.upper()}")
-        self.lbl_status.config(
-            text=f"🟢 Transmitiendo en vivo desde: {self.nombre_camara_activa} | ResNet-34 en línea",
-            fg=self.COLOR_GREEN
-        )
-        # Iniciar hilo de visión (procesamiento biométrico fuera del hilo de Tk)
-        self._iniciar_vision_thread()
-        self._loop_camara()
+            if hasattr(self, "lbl_gate_name"):
+                self.lbl_gate_name.config(text=f"SENSOR: {self.nombre_camara_activa.upper()}")
+            self.lbl_status.config(
+                text=f"🟢 Transmitiendo en vivo desde: {self.nombre_camara_activa} | ResNet-34 en línea",
+                fg=self.COLOR_GREEN
+            )
+            # Iniciar hilo de visión (procesamiento biométrico fuera del hilo de Tk)
+            self._iniciar_vision_thread()
+            self._loop_camara()
         except Exception as e:
             self.lbl_status.config(text=f"[-] Error al abrir video: {e}", fg=self.COLOR_RED)
 
