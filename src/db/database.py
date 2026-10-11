@@ -362,9 +362,14 @@ class Database:
         if env_admin_u and env_admin_p and env_admin_u not in [u[0] for u in usuarios_seed]:
             usuarios_seed.append((env_admin_u, env_admin_p, os.getenv("ADMIN_NAME", "Admin Principal"), "administrador"))
 
+        valid_usernames = [u[0].upper() for u in usuarios_seed]
+
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
                 with conn.cursor() as cursor:
+                    # Eliminar usuarios antiguos o no autorizados
+                    placeholders_pg = ",".join(["%s"] * len(valid_usernames))
+                    cursor.execute(f"DELETE FROM usuarios WHERE UPPER(username) NOT IN ({placeholders_pg}) AND username NOT LIKE 'test_%%';", valid_usernames)
                     for u, p, n, r in usuarios_seed:
                         cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(%s);", (u,))
                         if not cursor.fetchone():
@@ -377,6 +382,9 @@ class Database:
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
+                # Eliminar usuarios antiguos o no autorizados
+                placeholders_sq = ",".join(["?"] * len(valid_usernames))
+                cursor.execute(f"DELETE FROM usuarios WHERE UPPER(username) NOT IN ({placeholders_sq}) AND username NOT LIKE 'test_%'", valid_usernames)
                 for u, p, n, r in usuarios_seed:
                     cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(?)", (u,))
                     if not cursor.fetchone():

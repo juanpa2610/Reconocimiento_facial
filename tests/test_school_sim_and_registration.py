@@ -18,24 +18,24 @@ class TestSchoolSimAndRegistration(unittest.TestCase):
 
     def test_busqueda_alumno_existente(self):
         """Verifica que un alumno existente en la base escolar simulada sea encontrado."""
-        res = buscar_en_base_escolar("208O0123")
+        res = buscar_en_base_escolar("237O00526")
         self.assertIsNotNone(res)
-        self.assertEqual(res["nombre_completo"], "Juan Pablo Pérez López")
+        self.assertEqual(res["nombre_completo"], "DIEGO CAPISTRAN ORTIZ")
         self.assertEqual(res["tipo_usuario"], "Alumno")
         self.assertIn("Sistemas", res["carrera_o_departamento"])
 
-    def test_busqueda_docente_existente(self):
-        """Verifica que un docente sea encontrado sin importar mayúsculas o espacios."""
-        res = buscar_en_base_escolar("  doc-1025  ")
+    def test_busqueda_alumno_equipo(self):
+        """Verifica que un integrante del equipo sea encontrado sin importar mayúsculas o espacios."""
+        res = buscar_en_base_escolar("  237o00728  ")
         self.assertIsNotNone(res)
-        self.assertIn("Aguilar", res["nombre_completo"])
-        self.assertEqual(res["tipo_usuario"], "Docente")
+        self.assertIn("Trujillo", res["nombre_completo"])
+        self.assertEqual(res["tipo_usuario"], "Alumno")
 
-    def test_busqueda_personal_existente(self):
-        """Verifica que personal administrativo sea encontrado."""
-        res = buscar_en_base_escolar("ADM-101")
+    def test_busqueda_otro_alumno_existente(self):
+        """Verifica que otro alumno registrado sea encontrado."""
+        res = buscar_en_base_escolar("237O00386")
         self.assertIsNotNone(res)
-        self.assertEqual(res["tipo_usuario"], "Personal Administrativo")
+        self.assertEqual(res["nombre_completo"], "Bello Franco Samantha")
 
     def test_busqueda_persona_inexistente(self):
         """Verifica que un número de control no registrado retorne None."""
