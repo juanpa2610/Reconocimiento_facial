@@ -29,6 +29,7 @@ from typing import Optional, Dict, List, Tuple
 import config
 from src.db.database import Database
 from src.db.models import Estudiante, Usuario, CamaraConfig, RegistroAuditoria
+from src.db.school_db_sim import buscar_en_base_escolar
 from src.biometrics.encoder import FaceEncoder
 from src.biometrics.matcher import FaceMatcher, MatchResult
 from src.modules.registro import verificar_rostro_previo
@@ -106,9 +107,10 @@ class GuardApp:
         # Dispositivo / Flujo de video inicial (resuelto dinámicamente desde la BD)
         cam_activa = self.db.obtener_camara_activa()
         if cam_activa:
-            if cam_activa.ip in ("0", "", "localhost_cam"):
+            ip_str = str(cam_activa.ip).strip()
+            if ip_str.isdigit() or ip_str in ("", "localhost_cam"):
                 try:
-                    self.video_source = int(cam_activa.ip)
+                    self.video_source = int(ip_str) if ip_str.isdigit() else 0
                 except ValueError:
                     self.video_source = 0
             else:
@@ -149,7 +151,9 @@ class GuardApp:
             "timer": 0.0
         }
 
-        # Estado del flujo "Biometría Primero"
+        # Estado del flujo de Registro (Escolar e Invitados)
+        self.var_tipo_registro = tk.StringVar(value="escolar")
+        self.datos_escolares_confirmados = False
         self.nuevo_vector_candidato: Optional[np.ndarray] = None
 
         # Cargar recursos gráficos (Logo ITSX)
@@ -171,23 +175,32 @@ class GuardApp:
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _cargar_recursos(self):
-        """Carga y procesa el logo oficial del ITSX."""
+        """Carga y procesa el escudo y logotipo oficial del ITSX en alta calidad."""
+        self.escudo_header_img = None
         self.logo_header_img = None
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-        ruta_logo = os.path.join(base_dir, "assets", "itsx_logo_header.png")
-        if not os.path.exists(ruta_logo):
-            ruta_logo = os.path.join(base_dir, "assets", "itsx_logo_cropped.png")
 
-        if os.path.exists(ruta_logo):
-            try:
-                pil_img = Image.open(ruta_logo)
-                # Escalar con alta calidad (LANCZOS)
-                h_target = 54
-                w_target = int(pil_img.width * (h_target / pil_img.height))
-                pil_resized = pil_img.resize((w_target, h_target), Image.Resampling.LANCZOS)
-                self.logo_header_img = ImageTk.PhotoImage(pil_resized)
-            except Exception as e:
-                print(f"[-] Aviso: No se pudo cargar el logo: {e}")
+        # 1. Cargar Escudo Institucional HD (prioritario)
+        candidatos_escudo = [
+            os.path.join(base_dir, "assets", "itsx_escudo_hd.png"),
+            os.path.join(base_dir, "assets", "itsx_escudo_oficial.png"),
+            os.path.join(base_dir, "assets", "itsx_escudo_clean.png"),
+            os.path.join(base_dir, "assets", "itsx_logo_header.png"),
+            os.path.join(base_dir, "assets", "itsx_logo_cropped.png")
+        ]
+
+        for ruta in candidatos_escudo:
+            if os.path.exists(ruta):
+                try:
+                    pil_img = Image.open(ruta)
+                    # Altura adecuada para la barra de navegación institucional
+                    h_target = 60
+                    w_target = int(pil_img.width * (h_target / pil_img.height))
+                    pil_resized = pil_img.resize((w_target, h_target), Image.Resampling.LANCZOS)
+                    self.escudo_header_img = ImageTk.PhotoImage(pil_resized)
+                    break
+                except Exception as e:
+                    print(f"[-] Aviso: No se pudo cargar el escudo: {e}")
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -213,28 +226,38 @@ class GuardApp:
                         font=("Helvetica", 10))
         style.configure("Treeview.Heading",
                         background=self.COLOR_CARD,
-                        foreground="#ffffff",
+                        foreground="#38BDF8",
                         padding=[10, 6],
                         font=("Helvetica", 10, "bold"))
         style.map("Treeview", background=[("selected", "#0284C7")])
 
-        # Combobox
-        style.configure("TCombobox", fieldbackground=self.COLOR_CARD, background=self.COLOR_CARD, foreground="#000000")
+        # Combobox con alto contraste legible en modo oscuro
+        style.configure("TCombobox",
+                        fieldbackground=self.COLOR_CARD,
+                        background=self.COLOR_CARD,
+                        foreground="#FFFFFF",
+                        selectbackground="#0284C7",
+                        selectforeground="#FFFFFF",
+                        arrowcolor="#FFFFFF")
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", self.COLOR_CARD)],
+                  foreground=[("readonly", "#FFFFFF")])
 
     def _build_header(self):
-        header = tk.Frame(self.root, bg=self.COLOR_PANEL, height=80, padx=20, pady=10)
+        header = tk.Frame(self.root, bg=self.COLOR_PANEL, height=82, padx=20, pady=10)
         header.pack(side=tk.TOP, fill=tk.X)
 
-        # Lado izquierdo: Contenedor con Logo ITSX y Títulos Oficiales
+        # Lado izquierdo: Contenedor con Escudo ITSX y Títulos Oficiales
         left_box = tk.Frame(header, bg=self.COLOR_PANEL)
         left_box.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Tarjeta blanca para renderizar el logo institucional con máximo contraste
-        if self.logo_header_img:
-            logo_frame = tk.Frame(left_box, bg="#ffffff", padx=8, pady=4, bd=1, relief=tk.SOLID)
-            logo_frame.pack(side=tk.LEFT, padx=(0, 16))
-            lbl_logo = tk.Label(logo_frame, image=self.logo_header_img, bg="#ffffff")
-            lbl_logo.pack()
+        # Escudo oficial de la escuela integrado directamente con fondo transparente
+        if self.escudo_header_img:
+            lbl_escudo = tk.Label(left_box, image=self.escudo_header_img, bg=self.COLOR_PANEL)
+            lbl_escudo.pack(side=tk.LEFT, padx=(0, 16))
+        else:
+            lbl_icon = tk.Label(left_box, text="🏛️", font=("Helvetica", 30), bg=self.COLOR_PANEL)
+            lbl_icon.pack(side=tk.LEFT, padx=(0, 14))
 
         # Textos Institucionales
         text_frame = tk.Frame(left_box, bg=self.COLOR_PANEL)
@@ -455,64 +478,64 @@ class GuardApp:
         self.video_label_acceso = tk.Label(video_box, bg="#050811")
         self.video_label_acceso.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # Panel derecho: Tarjeta de Acceso y KPIs para el Guardia
-        right_panel = tk.Frame(main_box, bg=self.COLOR_BG, width=420)
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(12, 0))
+        # Panel derecho: Tarjeta de Acceso y KPIs para el Guardia (Ampliado)
+        right_panel = tk.Frame(main_box, bg=self.COLOR_BG, width=540, padx=16, pady=10)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(14, 0))
         right_panel.pack_propagate(False)
 
         # Tarjeta Gigante de Verificación
         self.card_frame = tk.Frame(
-            right_panel, bg=self.COLOR_CARD, bd=2, relief=tk.GROOVE, padx=18, pady=22
+            right_panel, bg=self.COLOR_CARD, bd=2, relief=tk.GROOVE, padx=22, pady=24
         )
         self.card_frame.pack(fill=tk.X, pady=(0, 15))
 
         self.lbl_card_icon = tk.Label(
-            self.card_frame, text="🛡️", font=("Helvetica", 42), bg=self.COLOR_CARD, fg=self.COLOR_ACCENT
+            self.card_frame, text="🛡️", font=("Helvetica", 46), bg=self.COLOR_CARD, fg=self.COLOR_ACCENT
         )
         self.lbl_card_icon.pack(pady=(0, 4))
 
         self.lbl_card_title = tk.Label(
             self.card_frame, text="ESPERANDO SUJETO",
-            font=("Helvetica", 17, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_CARD
+            font=("Helvetica", 18, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_CARD
         )
         self.lbl_card_title.pack()
 
         self.lbl_card_subtitle = tk.Label(
             self.card_frame, text="Aproxime el rostro hacia el sensor biométrico",
-            font=("Helvetica", 10), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD
+            font=("Helvetica", 11), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD
         )
         self.lbl_card_subtitle.pack(pady=(0, 10))
 
-        sep = tk.Frame(self.card_frame, bg=self.COLOR_CARD_BORDER, height=2)
-        sep.pack(fill=tk.X, pady=10)
+        self.sep_card = tk.Frame(self.card_frame, bg=self.COLOR_CARD_BORDER, height=2)
+        self.sep_card.pack(fill=tk.X, pady=12)
 
         # Rejilla de información del alumno
-        info_grid = tk.Frame(self.card_frame, bg=self.COLOR_CARD)
-        info_grid.pack(fill=tk.X)
+        self.info_grid = tk.Frame(self.card_frame, bg=self.COLOR_CARD)
+        self.info_grid.pack(fill=tk.X)
 
         self.lbl_card_name = tk.Label(
-            info_grid, text="Alumno: ---", font=("Helvetica", 13, "bold"),
+            self.info_grid, text="Alumno: ---", font=("Helvetica", 14, "bold"),
             fg="#ffffff", bg=self.COLOR_CARD, anchor=tk.W
         )
-        self.lbl_card_name.pack(fill=tk.X, pady=3)
+        self.lbl_card_name.pack(fill=tk.X, pady=4)
 
         self.lbl_card_mat = tk.Label(
-            info_grid, text="Matrícula: ---", font=("Helvetica", 12),
+            self.info_grid, text="Matrícula: ---", font=("Helvetica", 13, "bold"),
             fg="#ffffff", bg=self.COLOR_CARD, anchor=tk.W
         )
-        self.lbl_card_mat.pack(fill=tk.X, pady=3)
+        self.lbl_card_mat.pack(fill=tk.X, pady=4)
 
         self.lbl_card_car = tk.Label(
-            info_grid, text="Carrera: ---", font=("Helvetica", 11),
-            fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD, anchor=tk.W, wraplength=370, justify=tk.LEFT
+            self.info_grid, text="Carrera: ---", font=("Helvetica", 12),
+            fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD, anchor=tk.W, wraplength=480, justify=tk.LEFT
         )
-        self.lbl_card_car.pack(fill=tk.X, pady=3)
+        self.lbl_card_car.pack(fill=tk.X, pady=4)
 
         self.lbl_card_metric = tk.Label(
-            info_grid, text="Distancia L2: ---", font=("Helvetica", 10, "bold"),
+            self.info_grid, text="Distancia L2: ---", font=("Helvetica", 11, "bold"),
             fg=self.COLOR_ACCENT, bg=self.COLOR_CARD, anchor=tk.W
         )
-        self.lbl_card_metric.pack(fill=tk.X, pady=3)
+        self.lbl_card_metric.pack(fill=tk.X, pady=4)
 
         # Panel de Contadores / KPIs del Día
         kpi_frame = tk.Frame(right_panel, bg=self.COLOR_PANEL, padx=14, pady=14, bd=1, relief=tk.SOLID)
@@ -561,118 +584,245 @@ class GuardApp:
         main_box = tk.Frame(self.tab_registro, bg=self.COLOR_BG)
         main_box.pack(fill=tk.BOTH, expand=True, padx=12, pady=12)
 
-        # Panel izquierdo: Video para captura
+        # Panel izquierdo: Video para captura biométrica
         video_box = tk.Frame(main_box, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID)
         video_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 12))
 
         v_head = tk.Frame(video_box, bg=self.COLOR_CARD, padx=14, pady=9)
         v_head.pack(fill=tk.X)
-        tk.Label(v_head, text="📸 ENROLAMIENTO FACIAL (MODO ESPEJO CON MALLA)",
+        tk.Label(v_head, text="📸 ENROLAMIENTO BIOMÉTRICO (MODO ESPEJO CON MALLA FACIAL)",
                  font=("Helvetica", 11, "bold"), fg="#ffffff", bg=self.COLOR_CARD).pack(side=tk.LEFT)
 
         self.video_label_registro = tk.Label(video_box, bg="#050811")
         self.video_label_registro.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        # Panel derecho: Flujo Guiado en 2 Pasos
-        right_panel = tk.Frame(main_box, bg=self.COLOR_PANEL, width=470, padx=22, pady=18)
-        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(12, 0))
+        # Panel derecho: Flujo Guiado Institucional
+        # Panel derecho: Flujo Guiado Institucional (Ampliado para máxima legibilidad y confort visual)
+        right_panel = tk.Frame(main_box, bg=self.COLOR_PANEL, width=640, padx=22, pady=16)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, padx=(14, 0))
         right_panel.pack_propagate(False)
 
-        tk.Label(right_panel, text="ALTA DE ESTUDIANTE EN EL PADRÓN", font=("Helvetica", 14, "bold"),
-                 fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(0, 4))
+        # Barra superior con Título y BOTÓN PERMANENTE DE NUEVO REGISTRO / LIMPIAR
+        top_bar = tk.Frame(right_panel, bg=self.COLOR_PANEL)
+        top_bar.pack(fill=tk.X, pady=(0, 10))
 
-        tk.Label(right_panel, text="Flujo Inteligente: El sistema escanea y valida primero para no duplicar.",
-                 font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(0, 16))
+        title_box = tk.Frame(top_bar, bg=self.COLOR_PANEL)
+        title_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        # =====================================================================
-        # PASO 1: Validación Facial Inmediata
-        # =====================================================================
-        step1_box = tk.LabelFrame(
-            right_panel, text="  PASO 1: Validación Facial Inmediata (Biometría Primero)  ",
-            font=("Helvetica", 10, "bold"), fg=self.COLOR_ACCENT, bg=self.COLOR_PANEL, padx=12, pady=12
+        tk.Label(title_box, text="ENROLAMIENTO INSTITUCIONAL", font=("Helvetica", 14, "bold"),
+                 fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        tk.Label(title_box, text="Validación con Base Escolar y Registro de Invitados",
+                 font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(anchor=tk.W)
+
+        # Botón permanente para volver a registrar / limpiar formulario
+        self.btn_reset_registro = tk.Button(
+            top_bar, text="🔄 Nuevo Registro", font=("Helvetica", 10, "bold"),
+            bg="#D97706", fg="#0F172A", activebackground="#F59E0B", activeforeground="#0F172A",
+            relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+            command=self._limpiar_formulario_registro
         )
-        step1_box.pack(fill=tk.X, pady=(0, 15))
+        self.btn_reset_registro.pack(side=tk.RIGHT, pady=2)
+
+        # =====================================================================
+        # SELECTOR DE MODALIDAD (Comunidad ITSX vs Invitado/Proveedor)
+        # =====================================================================
+        sel_box = tk.Frame(right_panel, bg=self.COLOR_CARD, padx=14, pady=10, bd=1, relief=tk.SOLID)
+        sel_box.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(sel_box, text="Tipo de Persona a Registrar:*", font=("Helvetica", 10, "bold"),
+                 fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_CARD).pack(anchor=tk.W, pady=(0, 6))
+
+        f_radios = tk.Frame(sel_box, bg=self.COLOR_CARD)
+        f_radios.pack(fill=tk.X)
+
+        self.rb_escolar = tk.Radiobutton(
+            f_radios, text="🎓  Comunidad ITSX  (Alumno / Docente / Personal)",
+            variable=self.var_tipo_registro, value="escolar",
+            font=("Helvetica", 10, "bold"), bg=self.COLOR_CARD, fg=self.COLOR_TEXT,
+            selectcolor="#0B1120", activebackground=self.COLOR_CARD, activeforeground=self.COLOR_TEXT,
+            command=self._on_cambio_tipo_registro
+        )
+        self.rb_escolar.pack(anchor=tk.W, pady=(2, 4))
+
+        self.rb_invitado = tk.Radiobutton(
+            f_radios, text="👤  Invitado / Proveedor / Visita Externa",
+            variable=self.var_tipo_registro, value="invitado",
+            font=("Helvetica", 10, "bold"), bg=self.COLOR_CARD, fg=self.COLOR_TEXT,
+            selectcolor="#0B1120", activebackground=self.COLOR_CARD, activeforeground=self.COLOR_TEXT,
+            command=self._on_cambio_tipo_registro
+        )
+        self.rb_invitado.pack(anchor=tk.W, pady=(0, 2))
+
+        # =====================================================================
+        # PASO 1: Identificación y Validación
+        # =====================================================================
+        self.step1_box = tk.LabelFrame(
+            right_panel, text="  PASO 1: Identificación y Validación del Sujeto  ",
+            font=("Helvetica", 10, "bold"), fg=self.COLOR_ACCENT, bg=self.COLOR_PANEL, padx=14, pady=10
+        )
+        self.step1_box.pack(fill=tk.X, pady=(0, 10))
+
+        # --- A) SUBFRAME PARA COMUNIDAD ITSX (Búsqueda en Base Escolar) ---
+        self.frame_modo_escolar = tk.Frame(self.step1_box, bg=self.COLOR_PANEL)
+        self.frame_modo_escolar.pack(fill=tk.X)
+
+        tk.Label(self.frame_modo_escolar, text="Número de Control o Clave Institucional:*",
+                 font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(0, 3))
+
+        f_search_row = tk.Frame(self.frame_modo_escolar, bg=self.COLOR_PANEL)
+        f_search_row.pack(fill=tk.X, pady=(0, 6))
+
+        self.ent_matricula = tk.Entry(
+            f_search_row, font=("Helvetica", 12, "bold"), bg=self.COLOR_CARD,
+            fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT
+        )
+        self.ent_matricula.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        self.ent_matricula.bind("<Return>", lambda event: self._accion_buscar_escolar())
+
+        self.btn_buscar_escolar = tk.Button(
+            f_search_row, text="🔍 Buscar en Base Escolar", font=("Helvetica", 10, "bold"),
+            bg="#0284C7", fg="#ffffff", activebackground="#0369A1", activeforeground="#ffffff",
+            relief=tk.FLAT, padx=14, pady=6, cursor="hand2", command=self._accion_buscar_escolar
+        )
+        self.btn_buscar_escolar.pack(side=tk.RIGHT)
+
+        # Estado informativo de la búsqueda escolar
+        self.lbl_escolar_status = tk.Label(
+            self.frame_modo_escolar,
+            text="ℹ️ Ingrese el número de control (ej. 208O0123 / DOC-1025) y presione 'Buscar'.",
+            font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD,
+            padx=12, pady=8, bd=1, relief=tk.SOLID, wraplength=570, justify=tk.LEFT
+        )
+        self.lbl_escolar_status.pack(fill=tk.X, pady=(0, 8))
+
+        # Campos autocompletados desde la base escolar
+        f_auto = tk.Frame(self.frame_modo_escolar, bg=self.COLOR_CARD, padx=12, pady=10, bd=1, relief=tk.GROOVE)
+        f_auto.pack(fill=tk.X)
+
+        tk.Label(f_auto, text="Nombre Completo:", font=("Helvetica", 10, "bold"),
+                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD).grid(row=0, column=0, sticky=tk.W, pady=4)
+        self.ent_nombre = tk.Entry(f_auto, font=("Helvetica", 11, "bold"), bg=self.COLOR_PANEL, fg="#ffffff",
+                                   readonlybackground=self.COLOR_PANEL, state="readonly", bd=5, relief=tk.FLAT)
+        self.ent_nombre.grid(row=0, column=1, sticky=tk.EW, padx=(8, 0), pady=4)
+
+        tk.Label(f_auto, text="Rol Institucional:", font=("Helvetica", 10, "bold"),
+                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD).grid(row=1, column=0, sticky=tk.W, pady=4)
+        self.ent_tipo_persona = tk.Entry(f_auto, font=("Helvetica", 11, "bold"), bg=self.COLOR_PANEL, fg=self.COLOR_ACCENT,
+                                         readonlybackground=self.COLOR_PANEL, state="readonly", bd=5, relief=tk.FLAT)
+        self.ent_tipo_persona.grid(row=1, column=1, sticky=tk.EW, padx=(8, 0), pady=4)
+
+        tk.Label(f_auto, text="Carrera / Área:", font=("Helvetica", 10, "bold"),
+                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD).grid(row=2, column=0, sticky=tk.W, pady=4)
+        self.ent_carrera = tk.Entry(f_auto, font=("Helvetica", 11, "bold"), bg=self.COLOR_PANEL, fg="#ffffff",
+                                    readonlybackground=self.COLOR_PANEL, state="readonly", bd=5, relief=tk.FLAT)
+        self.ent_carrera.grid(row=2, column=1, sticky=tk.EW, padx=(8, 0), pady=4)
+        f_auto.columnconfigure(1, weight=1)
+
+        # Combobox auxiliar para mantener compatibilidad con métodos existentes
+        self.cmb_carrera = ttk.Combobox(self.frame_modo_escolar, values=CARRERAS_ITSX)
+        self.cmb_carrera.set("Ingeniería en Sistemas Computacionales")
+
+        # --- B) SUBFRAME PARA INVITADOS / PROVEEDORES (Sin base escolar) ---
+        self.frame_modo_invitado = tk.Frame(self.step1_box, bg=self.COLOR_PANEL)
+        # Se empaca cuando el modo es invitado
+
+        f_folio_row = tk.Frame(self.frame_modo_invitado, bg=self.COLOR_PANEL)
+        f_folio_row.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(f_folio_row, text="Folio de Visitante:", font=("Helvetica", 10, "bold"),
+                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        self.ent_matricula_inv = tk.Entry(f_folio_row, font=("Helvetica", 11, "bold"),
+                                          bg=self.COLOR_PANEL, fg=self.COLOR_GOLD_ITSX,
+                                          readonlybackground=self.COLOR_PANEL, state="readonly", width=18, bd=4, relief=tk.FLAT)
+        self.ent_matricula_inv.pack(side=tk.LEFT, padx=8)
+
+        tk.Label(self.frame_modo_invitado, text="Nombre Completo del Invitado / Proveedor:*",
+                 font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(4, 2))
+        self.ent_nombre_inv = tk.Entry(self.frame_modo_invitado, font=("Helvetica", 11, "bold"),
+                                       bg=self.COLOR_CARD, fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT)
+        self.ent_nombre_inv.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(self.frame_modo_invitado, text="Asunto / Motivo de Visita o Venta:*",
+                 font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(4, 2))
+        self.ent_asunto_inv = tk.Entry(self.frame_modo_invitado, font=("Helvetica", 11),
+                                       bg=self.COLOR_CARD, fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT)
+        self.ent_asunto_inv.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(self.frame_modo_invitado, text="Empresa o Procedencia (Opcional):",
+                 font=("Helvetica", 9, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(3, 2))
+        self.ent_empresa_inv = tk.Entry(self.frame_modo_invitado, font=("Helvetica", 10),
+                                        bg=self.COLOR_CARD, fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT)
+        self.ent_empresa_inv.pack(fill=tk.X, pady=(0, 6))
+
+        # =====================================================================
+        # PASO 2: Enrolamiento Biométrico Facial
+        # =====================================================================
+        self.step2_box = tk.LabelFrame(
+            right_panel, text="  PASO 2: Enrolamiento Biométrico Facial  ",
+            font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL, padx=14, pady=10
+        )
+        self.step2_box.pack(fill=tk.X, pady=(0, 10))
 
         self.btn_escanear = tk.Button(
-            step1_box, text="📸  1. Escanear Rostro y Verificar en BD",
+            self.step2_box, text="📸  Escanear Rostro del Candidato",
             font=("Helvetica", 11, "bold"), bg="#0284C7", fg="#ffffff",
             activebackground="#0369A1", activeforeground="#ffffff",
             relief=tk.FLAT, pady=11, cursor="hand2", command=self._accion_escanear_rostro
         )
-        self.btn_escanear.pack(fill=tk.X, pady=4)
+        self.btn_escanear.pack(fill=tk.X, pady=2)
 
-        # Tarjeta informativa de resultado del escaneo
         self.lbl_scan_result = tk.Label(
-            step1_box,
-            text="Coloque al estudiante de frente con buena iluminación y presione 'Escanear Rostro'.",
-            font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL, wraplength=410, justify=tk.LEFT
+            self.step2_box,
+            text="Coloque a la persona de frente al sensor y presione 'Escanear Rostro'.",
+            font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD,
+            padx=12, pady=8, bd=1, relief=tk.SOLID, wraplength=570, justify=tk.LEFT
         )
-        self.lbl_scan_result.pack(fill=tk.X, pady=6)
+        self.lbl_scan_result.pack(fill=tk.X, pady=4)
 
         # =====================================================================
-        # PASO 2: Formulario Institucional (Desbloqueado solo si es nuevo)
+        # PASO 3: Consentimiento Legal y Guardado
         # =====================================================================
-        self.step2_box = tk.LabelFrame(
-            right_panel, text="  PASO 2: Datos Institucionales (Rostro Nuevo)  ",
-            font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL, padx=12, pady=12
+        self.step3_box = tk.LabelFrame(
+            right_panel, text="  PASO 3: Consentimiento LFPDPPP y Guardado  ",
+            font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL, padx=14, pady=10
         )
-        self.step2_box.pack(fill=tk.X, pady=(0, 15))
-
-        # Matrícula
-        tk.Label(self.step2_box, text="Matrícula Oficial:*", font=("Helvetica", 9, "bold"),
-                 fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(2, 2))
-        self.ent_matricula = tk.Entry(
-            self.step2_box, font=("Helvetica", 11), bg=self.COLOR_CARD,
-            fg="#ffffff", insertbackground="#ffffff", state=tk.DISABLED
-        )
-        self.ent_matricula.pack(fill=tk.X, pady=(0, 8))
-
-        # Nombre Completo
-        tk.Label(self.step2_box, text="Nombre Completo:*", font=("Helvetica", 9, "bold"),
-                 fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(2, 2))
-        self.ent_nombre = tk.Entry(
-            self.step2_box, font=("Helvetica", 11), bg=self.COLOR_CARD,
-            fg="#ffffff", insertbackground="#ffffff", state=tk.DISABLED
-        )
-        self.ent_nombre.pack(fill=tk.X, pady=(0, 8))
-
-        # Carrera (Combobox Institucional del ITSX)
-        tk.Label(self.step2_box, text="Programa Académico / Carrera:*", font=("Helvetica", 9, "bold"),
-                 fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(2, 2))
-        self.cmb_carrera = ttk.Combobox(
-            self.step2_box, values=CARRERAS_ITSX, font=("Helvetica", 10), state=tk.DISABLED
-        )
-        self.cmb_carrera.set("Ingeniería en Sistemas Computacionales")
-        self.cmb_carrera.pack(fill=tk.X, pady=(0, 10))
+        self.step3_box.pack(fill=tk.X, pady=(0, 8))
 
         # Consentimiento Informado (LFPDPPP)
         self.var_consentimiento = tk.BooleanVar(value=False)
-        f_consent = tk.Frame(self.step2_box, bg=self.COLOR_PANEL)
-        f_consent.pack(fill=tk.X, pady=(0, 10))
+        f_consent = tk.Frame(self.step3_box, bg=self.COLOR_PANEL)
+        f_consent.pack(fill=tk.X, pady=(0, 8))
         self.chk_consentimiento = tk.Checkbutton(
             f_consent, text="Acepto el Aviso de Privacidad Integral (LFPDPPP)",
-            variable=self.var_consentimiento, font=("Helvetica", 9),
+            variable=self.var_consentimiento, font=("Helvetica", 10, "bold"),
             bg=self.COLOR_PANEL, fg=self.COLOR_TEXT, selectcolor=self.COLOR_CARD,
-            activebackground=self.COLOR_PANEL, activeforeground=self.COLOR_TEXT,
-            state=tk.DISABLED
+            activebackground=self.COLOR_PANEL, activeforeground=self.COLOR_TEXT
         )
         self.chk_consentimiento.pack(side=tk.LEFT)
         self.btn_ver_aviso = tk.Button(
-            f_consent, text="📄 Ver Aviso Legal", font=("Helvetica", 8, "underline"),
+            f_consent, text="📄 Ver Aviso Legal", font=("Helvetica", 10, "underline"),
             bg=self.COLOR_PANEL, fg=self.COLOR_ACCENT, bd=0, cursor="hand2",
             command=lambda: AvisoPrivacidadDialog(self.root)
         )
-        self.btn_ver_aviso.pack(side=tk.LEFT, padx=6)
+        self.btn_ver_aviso.pack(side=tk.LEFT, padx=8)
 
         # Botón Guardar
         self.btn_guardar = tk.Button(
-            self.step2_box, text="💾  2. Guardar Template Biométrico (1024 bytes)",
-            font=("Helvetica", 11, "bold"), bg=self.COLOR_GREEN, fg="#ffffff",
+            self.step3_box, text="💾  Guardar en Padrón (1024 bytes cifrados)",
+            font=("Helvetica", 12, "bold"), bg=self.COLOR_GREEN, fg="#ffffff",
             activebackground="#059669", activeforeground="#ffffff",
-            relief=tk.FLAT, pady=11, cursor="hand2", state=tk.DISABLED,
-            command=self._accion_guardar_alumno
+            relief=tk.FLAT, pady=12, cursor="hand2", state=tk.DISABLED,
+            command=self._accion_guardar_registro
         )
         self.btn_guardar.pack(fill=tk.X)
+
+        # Botón para registrar a otra persona (aparece tras éxito)
+        self.btn_otro_registro = tk.Button(
+            self.step3_box, text="➕  Registrar a Otra Persona",
+            font=("Helvetica", 11, "bold"), bg=self.COLOR_ACCENT, fg="#0F172A",
+            activebackground="#0284C7", activeforeground="#ffffff",
+            relief=tk.FLAT, pady=10, cursor="hand2",
+            command=self._limpiar_formulario_registro
+        )
 
     # -------------------------------------------------------------------------
     # PESTAÑA 3: BITÁCORA Y PADRÓN INSTITUCIONAL
@@ -907,6 +1057,34 @@ class GuardApp:
             self.root.after(200, self._loop_camara)
             return
 
+        # ── Detectar pérdida / recuperación de señal ──────────────────────────
+        no_signal = getattr(self.cap, "no_signal", False)
+        if no_signal:
+            # Actualizar barra de estado solo 1 vez por transición
+            if not getattr(self, "_cam_no_signal_shown", False):
+                self._cam_no_signal_shown = True
+                self.lbl_status.config(
+                    text="⚠️  Sin señal de cámara — reconectando automáticamente…",
+                    fg=self.COLOR_GOLD_ITSX
+                )
+            # Mostrar overlay animado en el panel de video activo
+            try:
+                tab = self.notebook.index(self.notebook.select())
+                target = self.video_label_acceso if tab == 0 else getattr(self, "video_label_registro", self.video_label_acceso)
+                self._mostrar_sin_senal(target)
+            except Exception:
+                pass
+            self.root.after(500, self._loop_camara)
+            return
+
+        # Cámara recuperó señal
+        if getattr(self, "_cam_no_signal_shown", False):
+            self._cam_no_signal_shown = False
+            self.lbl_status.config(
+                text=f"🟢 Transmitiendo en vivo desde: {self.nombre_camara_activa} | ResNet-34 en línea",
+                fg=self.COLOR_GREEN
+            )
+
         # timeout=0 no bloquea la interfaz; si no hay cuadro nuevo, simplemente se reintenta
         ret, frame = self.cap.read(timeout=0)
         if ret:
@@ -957,12 +1135,13 @@ class GuardApp:
                     if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
                         self.db_cooldown[est.matricula] = ahora
                         t_acceso = round((ahora - match.distancia * 0.1) % 1.2 + 0.15, 3)
+                        tipo_usu = "invitado" if (est.matricula.startswith("INV-") or "invitado" in (est.carrera or "").lower()) else ("docente" if "docente" in (est.carrera or "").lower() else "estudiante")
                         self.db.log_acceso(
                             estudiante_id=est.id, matricula=est.matricula,
                             nombre=est.nombre, distancia=match.distancia,
                             estado="PERMITIDO",
                             tiempo_acceso_segundos=t_acceso,
-                            tipo_usuario="estudiante",
+                            tipo_usuario=tipo_usu,
                             condicion_luz="luz normal"
                         )
                         self.conteo_autorizados += 1
@@ -1008,40 +1187,59 @@ class GuardApp:
         tiempo_transcurrido = ahora - self.access_card_state["timer"]
 
         if estado == "AUTORIZADO" and tiempo_transcurrido <= config.VISUAL_STATUS_PERSISTENCE_SECONDS:
-            self.card_frame.config(bg="#064E3B")
-            self.lbl_card_icon.config(text="✅", fg=self.COLOR_GREEN, bg="#064E3B")
-            self.lbl_card_title.config(text="ACCESO AUTORIZADO", fg=self.COLOR_GREEN, bg="#064E3B")
-            self.lbl_card_subtitle.config(text="Estudiante verificado en padrón ITSX", fg="#ffffff", bg="#064E3B")
-            self.lbl_card_name.config(text=f"Alumno: {self.access_card_state['name']}", bg="#064E3B")
-            self.lbl_card_mat.config(text=f"Matrícula: {self.access_card_state['matricula']}", bg="#064E3B")
-            self.lbl_card_car.config(text=f"Carrera: {self.access_card_state['carrera']}", bg="#064E3B")
+            bg_card = "#064E3B"
+            self.card_frame.config(bg=bg_card)
+            if hasattr(self, "sep_card"):
+                self.sep_card.config(bg="#059669")
+            if hasattr(self, "info_grid"):
+                self.info_grid.config(bg=bg_card)
+            self.lbl_card_icon.config(text="✅", fg="#34D399", bg=bg_card)
+            self.lbl_card_title.config(text="ACCESO AUTORIZADO", fg="#34D399", bg=bg_card)
+            mat_val = self.access_card_state.get("matricula", "")
+            car_val = self.access_card_state.get("carrera", "")
+            es_inv = str(mat_val).startswith("INV-") or "invitado" in str(car_val).lower()
+            tipo_header = "Invitado / Proveedor" if es_inv else "Comunidad ITSX"
+            self.lbl_card_subtitle.config(text=f"✓ {tipo_header} verificado en padrón", fg="#ffffff", bg=bg_card)
+            self.lbl_card_name.config(text=f"Nombre: {self.access_card_state['name']}", fg="#ffffff", bg=bg_card)
+            self.lbl_card_mat.config(text=f"Folio/Control: {mat_val}", fg="#38BDF8", bg=bg_card)
+            self.lbl_card_car.config(text=f"Detalle/Área: {car_val}", fg=self.COLOR_GOLD_ITSX, bg=bg_card)
             self.lbl_card_metric.config(
                 text=f"Distancia L2: {self.access_card_state['distancia']:.3f}  |  {self.access_card_state['confianza']:.0f}% certeza",
-                fg=self.COLOR_GREEN, bg="#064E3B"
+                fg="#A7F3D0", bg=bg_card
             )
 
         elif estado == "DENEGADO" and tiempo_transcurrido <= config.VISUAL_STATUS_PERSISTENCE_SECONDS:
-            self.card_frame.config(bg="#4C1D24")
-            self.lbl_card_icon.config(text="⛔", fg=self.COLOR_RED, bg="#4C1D24")
-            self.lbl_card_title.config(text="ACCESO DENEGADO", fg=self.COLOR_RED, bg="#4C1D24")
-            self.lbl_card_subtitle.config(text="Sujeto NO identificado en padrón institucional", fg="#ffffff", bg="#4C1D24")
-            self.lbl_card_name.config(text="Alumno: Desconocido", bg="#4C1D24")
-            self.lbl_card_mat.config(text="Matrícula: ---", bg="#4C1D24")
-            self.lbl_card_car.config(text="Acceso Restringido", bg="#4C1D24")
+            bg_card = "#4C1D24"
+            self.card_frame.config(bg=bg_card)
+            if hasattr(self, "sep_card"):
+                self.sep_card.config(bg="#EF4444")
+            if hasattr(self, "info_grid"):
+                self.info_grid.config(bg=bg_card)
+            self.lbl_card_icon.config(text="⛔", fg="#F87171", bg=bg_card)
+            self.lbl_card_title.config(text="ACCESO DENEGADO", fg="#F87171", bg=bg_card)
+            self.lbl_card_subtitle.config(text="Sujeto NO identificado en padrón institucional", fg="#ffffff", bg=bg_card)
+            self.lbl_card_name.config(text="Persona: Desconocida", fg="#ffffff", bg=bg_card)
+            self.lbl_card_mat.config(text="Identificador: Sin registro", fg=self.COLOR_TEXT_MUTED, bg=bg_card)
+            self.lbl_card_car.config(text="Acceso Restringido", fg="#EF4444", bg=bg_card)
             self.lbl_card_metric.config(
                 text=f"Distancia mínima: {self.access_card_state['distancia']:.3f} > {config.FACE_DISTANCE_THRESHOLD:.2f}",
-                fg=self.COLOR_RED, bg="#4C1D24"
+                fg="#FCA5A5", bg=bg_card
             )
 
         else:
-            self.card_frame.config(bg=self.COLOR_CARD)
-            self.lbl_card_icon.config(text="🛡️", fg=self.COLOR_ACCENT, bg=self.COLOR_CARD)
-            self.lbl_card_title.config(text="ESPERANDO SUJETO", fg=self.COLOR_TEXT, bg=self.COLOR_CARD)
+            bg_card = self.COLOR_CARD
+            self.card_frame.config(bg=bg_card)
+            if hasattr(self, "sep_card"):
+                self.sep_card.config(bg=self.COLOR_CARD_BORDER)
+            if hasattr(self, "info_grid"):
+                self.info_grid.config(bg=bg_card)
+            self.lbl_card_icon.config(text="🛡️", fg=self.COLOR_ACCENT, bg=bg_card)
+            self.lbl_card_title.config(text="ESPERANDO SUJETO", fg=self.COLOR_TEXT, bg=bg_card)
             self.lbl_card_subtitle.config(text="Aproxime el rostro hacia el sensor biométrico", fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_CARD)
-            self.lbl_card_name.config(text="Alumno: ---", bg=self.COLOR_CARD)
-            self.lbl_card_mat.config(text="Matrícula: ---", bg=self.COLOR_CARD)
-            self.lbl_card_car.config(text="Carrera: ---", bg=self.COLOR_CARD)
-            self.lbl_card_metric.config(text="Distancia L2: ---", fg=self.COLOR_ACCENT, bg=self.COLOR_CARD)
+            self.lbl_card_name.config(text="Persona: ---", fg="#ffffff", bg=bg_card)
+            self.lbl_card_mat.config(text="Matrícula: ---", fg="#ffffff", bg=bg_card)
+            self.lbl_card_car.config(text="Carrera: ---", fg=self.COLOR_TEXT_MUTED, bg=bg_card)
+            self.lbl_card_metric.config(text="Distancia L2: ---", fg=self.COLOR_ACCENT, bg=bg_card)
 
     def _procesar_cuadro_registro(self, frame):
         frame_mirror = cv2.flip(frame, 1)
@@ -1083,17 +1281,182 @@ class GuardApp:
         label_widget.img_tk = img_tk
         label_widget.configure(image=img_tk)
 
+    def _mostrar_sin_senal(self, label_widget):
+        """Dibuja un overlay oscuro con icono y texto 'Sin señal' en el label de video."""
+        try:
+            w = max(640, label_widget.winfo_width())
+            h = max(480, label_widget.winfo_height())
+        except Exception:
+            w, h = 640, 480
+
+        # Fondo oscuro con ligero ruido (efecto TV sin señal)
+        noise = np.random.randint(10, 35, (h, w, 3), dtype=np.uint8)
+        frame = noise.copy()
+
+        # Panel central semitransparente
+        px1, py1 = w // 4, h // 3
+        px2, py2 = 3 * w // 4, 2 * h // 3
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (px1, py1), (px2, py2), (20, 20, 40), -1)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+        cv2.rectangle(frame, (px1, py1), (px2, py2), (60, 80, 120), 2)
+
+        cx, cy = w // 2, h // 2
+        # Icono de cámara tachada
+        cv2.putText(frame, "CAMARA", (cx - 90, cy - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (90, 130, 200), 2, cv2.LINE_AA)
+        cv2.putText(frame, "SIN SENAL", (cx - 100, cy + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.1, (50, 200, 255), 2, cv2.LINE_AA)
+        cv2.putText(frame, "Reconectando automaticamente...", (cx - 170, cy + 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (140, 160, 180), 1, cv2.LINE_AA)
+
+        img_pil = Image.fromarray(frame)
+        img_tk = ImageTk.PhotoImage(image=img_pil)
+        label_widget.img_tk = img_tk
+        label_widget.configure(image=img_tk)
+
     # -------------------------------------------------------------------------
-    # ACCIONES DE REGISTRO: BIOMETRÍA PRIMERO
+    # ACCIONES DE REGISTRO INSTITUCIONAL (ESCOLAR E INVITADOS)
     # -------------------------------------------------------------------------
+    def _on_cambio_tipo_registro(self):
+        """Cambia entre la modalidad de Comunidad ITSX e Invitado/Proveedor."""
+        modo = self.var_tipo_registro.get()
+        if modo == "escolar":
+            self.frame_modo_invitado.pack_forget()
+            self.frame_modo_escolar.pack(fill=tk.X)
+            self.ent_matricula.focus_set()
+        else:
+            self.frame_modo_escolar.pack_forget()
+            self.frame_modo_invitado.pack(fill=tk.X)
+            self._set_entry_text(self.ent_matricula_inv, self._generar_folio_invitado())
+            self.ent_nombre_inv.focus_set()
+        self._limpiar_formulario_registro()
+
+    def _generar_folio_invitado(self) -> str:
+        """Genera un folio secuencial único para visitantes (ej. INV-2026-001)."""
+        year = datetime.now().year
+        todos = self.db.get_all_active_estudiantes()
+        invitados = [e for e in todos if e.matricula.startswith(f"INV-{year}-")]
+        num = len(invitados) + 1
+        folio = f"INV-{year}-{num:03d}"
+        while self.db.get_estudiante_by_matricula(folio) is not None:
+            num += 1
+            folio = f"INV-{year}-{num:03d}"
+        return folio
+
+    def _set_entry_text(self, entry: tk.Entry, text: str):
+        """Inserta texto en un Entry conservando su estado original."""
+        prev = entry.cget("state")
+        entry.config(state=tk.NORMAL)
+        entry.delete(0, tk.END)
+        entry.insert(0, text)
+        entry.config(state=prev)
+
+    def _accion_buscar_escolar(self):
+        """Busca el número de control en la base de datos escolar simulada del ITSX."""
+        clave = self.ent_matricula.get().strip().upper()
+        if not clave:
+            messagebox.showwarning(
+                "Número de Control Requerido",
+                "Por favor ingrese el número de control del alumno, docente o personal."
+            )
+            self.ent_matricula.focus_set()
+            return
+
+        # Consultar la base de datos escolar simulada
+        datos = buscar_en_base_escolar(clave)
+        if not datos:
+            # NO EXISTE
+            self.lbl_escolar_status.config(
+                text="❌ Alumno o docente o personal no existe en la base de datos escolar.",
+                fg="#FCA5A5",
+                bg="#450A0A"
+            )
+            messagebox.showerror(
+                "No Encontrado",
+                f"❌ Alumno o docente o personal no existe en la base de datos de la escuela.\n\n"
+                f"Número de control ingresado: '{clave}'\n"
+                "Verifique que la clave sea correcta o consulte a Servicios Escolares / Recursos Humanos."
+            )
+            self._set_entry_text(self.ent_nombre, "")
+            self._set_entry_text(self.ent_tipo_persona, "")
+            self._set_entry_text(self.ent_carrera, "")
+            self.datos_escolares_confirmados = False
+            self.step2_box.config(fg=self.COLOR_TEXT_MUTED)
+            self.btn_guardar.config(state=tk.DISABLED)
+            return
+
+        # SÍ EXISTE: Verificar si ya está enrolado en el padrón biométrico
+        existente_en_padron = self.db.get_estudiante_by_matricula(clave)
+        if existente_en_padron:
+            self.lbl_escolar_status.config(
+                text=f"⚠️ {datos['nombre_completo']} ({clave}) YA cuenta con biometría registrada.",
+                fg="#FCD34D",
+                bg="#451A03"
+            )
+            messagebox.showwarning(
+                "Ya Registrado en Padrón",
+                f"El registro con número de control '{clave}' ya cuenta con biometría en el padrón:\n\n"
+                f"• Nombre: {existente_en_padron.nombre}\n"
+                f"• Carrera/Área: {existente_en_padron.carrera}\n\n"
+                "Si requiere actualizar sus datos o biometría, utilice la opción 'Editar' en la Pestaña 3 (Bitácora y Padrón)."
+            )
+            self._set_entry_text(self.ent_nombre, datos["nombre_completo"])
+            self._set_entry_text(self.ent_tipo_persona, datos["tipo_usuario"])
+            self._set_entry_text(self.ent_carrera, datos["carrera_o_departamento"])
+            self.datos_escolares_confirmados = False
+            self.btn_guardar.config(state=tk.DISABLED)
+            return
+
+        # VÁLIDO Y NUEVO EN PADRÓN
+        self._set_entry_text(self.ent_nombre, datos["nombre_completo"])
+        self._set_entry_text(self.ent_tipo_persona, datos["tipo_usuario"])
+        self._set_entry_text(self.ent_carrera, datos["carrera_o_departamento"])
+        self.datos_escolares_confirmados = True
+
+        self.lbl_escolar_status.config(
+            text=f"✅ Encontrado: {datos['nombre_completo']} | {datos['tipo_usuario']} | {datos['carrera_o_departamento']}",
+            fg="#34D399",
+            bg="#064E3B"
+        )
+        self.step2_box.config(fg=self.COLOR_GREEN)
+        self.lbl_scan_result.config(
+            text=f"✅ Identidad confirmada: {datos['nombre_completo']}. Posicione a la persona frente a la cámara y presione 'Escanear Rostro'.",
+            fg=self.COLOR_ACCENT,
+            bg=self.COLOR_CARD
+        )
+
     def _accion_escanear_rostro(self):
+        """Escanea el rostro en vivo y extrae el template biométrico de 1024 bytes."""
+        modo = self.var_tipo_registro.get()
+        if modo == "escolar" and not self.datos_escolares_confirmados:
+            messagebox.showwarning(
+                "Validación Escolar Requerida",
+                "Primero debe ingresar el número de control y presionar 'Buscar en Base Escolar' para validar la identidad de la persona."
+            )
+            self.ent_matricula.focus_set()
+            return
+        elif modo == "invitado":
+            nom = self.ent_nombre_inv.get().strip()
+            asu = self.ent_asunto_inv.get().strip()
+            if not nom or not asu:
+                messagebox.showwarning(
+                    "Datos de Invitado Requeridos",
+                    "Debe registrar el Nombre Completo y el Asunto / Motivo de Visita del invitado antes de escanear su rostro."
+                )
+                if not nom:
+                    self.ent_nombre_inv.focus_set()
+                else:
+                    self.ent_asunto_inv.focus_set()
+                return
+
         if self.cap is None or not self.cap.isOpened():
             messagebox.showerror("Error de Cámara", "La cámara no está disponible.")
             return
 
         ret, frame = self.cap.read(timeout=2.0)
         if not ret:
-            messagebox.showerror("Error", "No se pudo leer el fotograma.")
+            messagebox.showerror("Error", "No se pudo leer el fotograma de la cámara.")
             return
 
         frame_mirror = cv2.flip(frame, 1)
@@ -1102,21 +1465,27 @@ class GuardApp:
         boxes = self.encoder.detect_face_locations_scaled(rgb_frame, max(config.DETECTION_WIDTH, 640))
         if len(boxes) == 0:
             self.lbl_scan_result.config(
-                text="❌ No se detectó ningún rostro. Pida al alumno colocarse de frente al centro.",
-                fg=self.COLOR_RED
+                text="❌ No se detectó ningún rostro. Colóquese de frente al centro con buena iluminación.",
+                fg="#FCA5A5",
+                bg="#450A0A"
             )
             return
 
         if len(boxes) > 1:
             self.lbl_scan_result.config(
-                text="❌ Múltiples personas en el encuadre. Solo debe colocarse UNA persona.",
-                fg=self.COLOR_RED
+                text="❌ Múltiples personas en el encuadre. Solo debe colocarse UNA persona a la vez.",
+                fg="#FCA5A5",
+                bg="#450A0A"
             )
             return
 
         encodings = self.encoder.extract_encodings(rgb_frame, boxes)
         if not encodings:
-            self.lbl_scan_result.config(text="❌ No se pudo extraer el template biométrico.", fg=self.COLOR_RED)
+            self.lbl_scan_result.config(
+                text="❌ No se pudo extraer el template biométrico.",
+                fg="#FCA5A5",
+                bg="#450A0A"
+            )
             return
 
         candidato_vector = encodings[0]
@@ -1126,56 +1495,36 @@ class GuardApp:
 
         if ya_registrado and est_existente:
             self.nuevo_vector_candidato = None
-            self._deshabilitar_formulario()
+            self.btn_guardar.config(state=tk.DISABLED)
 
             alerta_msg = (
                 f"⚠️ ¡ALTO! Este rostro YA ESTÁ REGISTRADO en el ITSX:\n\n"
                 f"• Nombre: {est_existente.nombre}\n"
-                f"• Matrícula: {est_existente.matricula}\n"
-                f"• Carrera: {est_existente.carrera or 'Sin Carrera'}\n"
+                f"• Identificador: {est_existente.matricula}\n"
+                f"• Carrera/Detalle: {est_existente.carrera or 'Sin detalle'}\n"
                 f"• Distancia L2: {dist:.4f} (<= {config.FACE_DISTANCE_THRESHOLD:.2f})\n\n"
                 f"No es necesario volver a registrarlo."
             )
             self.lbl_scan_result.config(
-                text=f"⚠️ ROSTRO YA REGISTRADO en el ITSX:\n{est_existente.nombre} ({est_existente.matricula}).\nNo se requieren datos.",
-                fg=self.COLOR_GOLD_ITSX
+                text=f"⚠️ ROSTRO YA REGISTRADO: {est_existente.nombre} ({est_existente.matricula}). No requiere nuevo registro.",
+                fg="#FCD34D",
+                bg="#451A03"
             )
             messagebox.showwarning("Rostro Ya Registrado en el ITSX", alerta_msg)
             return
 
         # Rostro nuevo y legítimo
         self.nuevo_vector_candidato = candidato_vector
-        self._habilitar_formulario()
-
         self.lbl_scan_result.config(
-            text="✅ ¡Rostro nuevo y verificado! Ingrese los datos del alumno para concluir el registro.",
-            fg=self.COLOR_GREEN
+            text="✅ ¡Rostro verificado y vector de 1024 bytes extraído en memoria! Acepte el Aviso de Privacidad y guarde el registro.",
+            fg="#34D399",
+            bg="#064E3B"
         )
-        self.ent_matricula.focus_set()
-
-    def _habilitar_formulario(self):
-        self.step2_box.config(fg=self.COLOR_GREEN)
-        self.ent_matricula.config(state=tk.NORMAL)
-        self.ent_nombre.config(state=tk.NORMAL)
-        self.cmb_carrera.config(state="readonly")
-        if hasattr(self, "chk_consentimiento"):
-            self.chk_consentimiento.config(state=tk.NORMAL)
+        self.step3_box.config(fg=self.COLOR_GREEN)
         self.btn_guardar.config(state=tk.NORMAL)
 
-    def _deshabilitar_formulario(self):
-        self.step2_box.config(fg=self.COLOR_TEXT_MUTED)
-        self.ent_matricula.delete(0, tk.END)
-        self.ent_nombre.delete(0, tk.END)
-        self.ent_matricula.config(state=tk.DISABLED)
-        self.ent_nombre.config(state=tk.DISABLED)
-        self.cmb_carrera.config(state=tk.DISABLED)
-        if hasattr(self, "var_consentimiento"):
-            self.var_consentimiento.set(False)
-        if hasattr(self, "chk_consentimiento"):
-            self.chk_consentimiento.config(state=tk.DISABLED)
-        self.btn_guardar.config(state=tk.DISABLED)
-
-    def _accion_guardar_alumno(self):
+    def _accion_guardar_registro(self):
+        """Guarda al alumno, docente, personal o invitado en el padrón institucional."""
         if self.nuevo_vector_candidato is None:
             messagebox.showerror("Error", "Primero debe escanear y validar un rostro.")
             return
@@ -1188,19 +1537,43 @@ class GuardApp:
             )
             return
 
-        matricula = self.ent_matricula.get().strip()
-        nombre = self.ent_nombre.get().strip()
-        carrera = self.cmb_carrera.get().strip()
+        modo = self.var_tipo_registro.get()
 
-        if not matricula or not nombre:
-            messagebox.showerror("Campos Incompletos", "La matrícula y el nombre completo son obligatorios.")
-            return
+        if modo == "escolar":
+            matricula = self.ent_matricula.get().strip().upper()
+            nombre = self.ent_nombre.get().strip()
+            tipo = self.ent_tipo_persona.get().strip() or "Alumno"
+            carrera = self.ent_carrera.get().strip()
+
+            if not matricula or not nombre:
+                messagebox.showerror("Campos Incompletos", "Debe validar primero la matrícula en la base escolar.")
+                return
+
+            detalle_carrera = f"{tipo}: {carrera}" if tipo != "Alumno" else carrera
+
+        else:  # MODO INVITADO
+            matricula = self.ent_matricula_inv.get().strip().upper()
+            nombre = self.ent_nombre_inv.get().strip()
+            asunto = self.ent_asunto_inv.get().strip()
+            empresa = self.ent_empresa_inv.get().strip()
+
+            if not nombre or not asunto:
+                messagebox.showerror("Campos Incompletos", "El nombre completo y el asunto son obligatorios para invitados.")
+                return
+
+            if not matricula:
+                matricula = self._generar_folio_invitado()
+
+            if empresa:
+                detalle_carrera = f"Invitado ({empresa}): {asunto}"
+            else:
+                detalle_carrera = f"Invitado: {asunto}"
 
         alumno_m = self.db.get_estudiante_by_matricula(matricula)
         if alumno_m:
             messagebox.showerror(
                 "Matrícula Duplicada",
-                f"La matrícula '{matricula}' ya pertenece a '{alumno_m.nombre}'. Ingrese una matrícula válida."
+                f"El identificador '{matricula}' ya pertenece a '{alumno_m.nombre}'. Operación cancelada."
             )
             return
 
@@ -1208,31 +1581,104 @@ class GuardApp:
             self.db.save_estudiante(
                 matricula=matricula,
                 nombre=nombre,
-                carrera=carrera,
+                carrera=detalle_carrera,
                 embedding=self.nuevo_vector_candidato
             )
 
             self.nuevo_vector_candidato = None
-            self._deshabilitar_formulario()
-            self.lbl_scan_result.config(
-                text=f"🎉 ¡Éxito! Estudiante '{nombre}' incorporado al padrón del ITSX (1024 bytes cifrados).",
-                fg=self.COLOR_GREEN
-            )
-
             self._recargar_alumnos()
 
-            messagebox.showinfo(
-                "Registro Exitoso en ITSX",
-                f"Estudiante {nombre} ({matricula})\n"
-                f"Carrera: {carrera}\n\n"
-                f"✓ Vector biométrico cifrado en reposo (LFPDPPP).\n"
-                f"✓ Fotograma destruido de memoria RAM."
+            self.lbl_scan_result.config(
+                text=f"🎉 ¡Éxito! '{nombre}' incorporado al padrón del ITSX (1024 bytes cifrados).",
+                fg="#34D399",
+                bg="#064E3B"
             )
+            self.btn_guardar.config(state=tk.DISABLED)
+            self.btn_otro_registro.pack(fill=tk.X, pady=(6, 0))
+
+            resp = messagebox.askyesno(
+                "Registro Exitoso en ITSX",
+                f"✓ Persona: {nombre}\n"
+                f"✓ Identificador: {matricula}\n"
+                f"✓ Detalle: {detalle_carrera}\n\n"
+                f"✓ Vector biométrico cifrado en reposo (LFPDPPP).\n"
+                f"✓ Fotograma destruido de memoria RAM.\n\n"
+                f"¿Desea registrar a otra persona ahora?"
+            )
+
+            if resp:
+                self._limpiar_formulario_registro()
 
         except ValueError as e:
             messagebox.showerror("Validación de Registro", str(e))
         except Exception as e:
             messagebox.showerror("Error al Guardar", f"No se pudo completar el registro: {e}")
+
+    def _limpiar_formulario_registro(self):
+        """Limpia y resetea el formulario por completo para permitir registros consecutivos sin bloqueos."""
+        self.nuevo_vector_candidato = None
+        self.datos_escolares_confirmados = False
+        if hasattr(self, "var_consentimiento"):
+            self.var_consentimiento.set(False)
+
+        # Limpiar campos escolares
+        if hasattr(self, "ent_matricula"):
+            self.ent_matricula.delete(0, tk.END)
+        if hasattr(self, "ent_nombre"):
+            self._set_entry_text(self.ent_nombre, "")
+        if hasattr(self, "ent_tipo_persona"):
+            self._set_entry_text(self.ent_tipo_persona, "")
+        if hasattr(self, "ent_carrera"):
+            self._set_entry_text(self.ent_carrera, "")
+        if hasattr(self, "lbl_escolar_status"):
+            self.lbl_escolar_status.config(
+                text="ℹ️ Ingrese el número de control (ej. 208O0123 / DOC-1025) y presione 'Buscar'.",
+                fg=self.COLOR_TEXT_MUTED,
+                bg=self.COLOR_CARD
+            )
+
+        # Limpiar campos de invitado
+        if hasattr(self, "ent_matricula_inv"):
+            self._set_entry_text(self.ent_matricula_inv, self._generar_folio_invitado())
+        if hasattr(self, "ent_nombre_inv"):
+            self.ent_nombre_inv.delete(0, tk.END)
+        if hasattr(self, "ent_asunto_inv"):
+            self.ent_asunto_inv.delete(0, tk.END)
+        if hasattr(self, "ent_empresa_inv"):
+            self.ent_empresa_inv.delete(0, tk.END)
+
+        # Reset avisos y botones
+        if hasattr(self, "lbl_scan_result"):
+            self.lbl_scan_result.config(
+                text="Coloque a la persona de frente al sensor y presione 'Escanear Rostro'.",
+                fg=self.COLOR_TEXT_MUTED,
+                bg=self.COLOR_CARD
+            )
+        if hasattr(self, "step2_box"):
+            self.step2_box.config(fg=self.COLOR_TEXT_MUTED)
+        if hasattr(self, "step3_box"):
+            self.step3_box.config(fg=self.COLOR_TEXT_MUTED)
+        if hasattr(self, "btn_guardar"):
+            self.btn_guardar.config(state=tk.DISABLED)
+        if hasattr(self, "btn_otro_registro"):
+            self.btn_otro_registro.pack_forget()
+
+        # Foco según el modo
+        if hasattr(self, "var_tipo_registro") and self.var_tipo_registro.get() == "escolar":
+            if hasattr(self, "ent_matricula"):
+                self.ent_matricula.focus_set()
+        else:
+            if hasattr(self, "ent_nombre_inv"):
+                self.ent_nombre_inv.focus_set()
+
+    def _habilitar_formulario(self):
+        pass
+
+    def _deshabilitar_formulario(self):
+        self._limpiar_formulario_registro()
+
+    def _accion_guardar_alumno(self):
+        self._accion_guardar_registro()
 
     # -------------------------------------------------------------------------
     # GESTIÓN DE PADRÓN Y AUDITORÍA

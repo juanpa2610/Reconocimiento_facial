@@ -9,9 +9,11 @@ Incluye:
 - CrearUsuarioDialog: Modal para el alta de nuevos operadores y administradores.
 """
 
+import os
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, Tuple, List, Dict
+from PIL import Image, ImageTk
 from src.db.database import Database
 from src.db.models import Usuario, Estudiante
 
@@ -29,22 +31,27 @@ class LoginDialog(tk.Toplevel):
         self.on_cancel = on_cancel
         self.user_authenticated = False
 
-        self.title("ITSX - Inicio de Sesión Seguro")
-        self.geometry("460x540")
+        self.title("ITSX - Control de Acceso Biométrico | Inicio de Sesión")
+        self.geometry("500x680")
         self.resizable(False, False)
 
-        # Paleta Institucional
+        # Paleta Institucional Premium
         self.COLOR_BG = "#0B1120"
         self.COLOR_PANEL = "#151F32"
         self.COLOR_CARD = "#1E293B"
         self.COLOR_TEXT = "#F8FAFC"
         self.COLOR_TEXT_MUTED = "#94A3B8"
-        self.COLOR_GOLD_ITSX = "#E5A823"
+        self.COLOR_GOLD_ITSX = "#F59E0B"
         self.COLOR_GREEN = "#10B981"
+        self.COLOR_GREEN_HOVER = "#059669"
         self.COLOR_RED = "#EF4444"
         self.COLOR_ACCENT = "#38BDF8"
 
         self.configure(bg=self.COLOR_BG)
+
+        # Cargar Escudo oficial de la escuela
+        self.logo_tk = None
+        self._cargar_escudo_itsx()
 
         # Modalidad
         self.transient(parent)
@@ -53,6 +60,38 @@ class LoginDialog(tk.Toplevel):
 
         self._build_ui()
         self._center_window(parent)
+
+    def _cargar_escudo_itsx(self):
+        """Carga el escudo oficial del ITSX en alta definición desde la carpeta assets."""
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        candidatos = [
+            os.path.join(base_dir, "assets", "itsx_escudo_hd.png"),
+            os.path.join(base_dir, "assets", "itsx_escudo_oficial.png"),
+            os.path.join(base_dir, "assets", "itsx_escudo_clean.png"),
+            os.path.join(base_dir, "assets", "itsx_logo_hd.png"),
+            os.path.join(base_dir, "assets", "itsx_logo_transparent.png"),
+            os.path.join(base_dir, "assets", "itsx_logo.png")
+        ]
+        for ruta in candidatos:
+            if os.path.exists(ruta):
+                try:
+                    pil_img = Image.open(ruta)
+                    # Si es el escudo institucional vertical
+                    if "escudo" in os.path.basename(ruta):
+                        target_h = 115
+                        target_w = int(pil_img.width * (target_h / pil_img.height))
+                    else:
+                        target_w = 260
+                        target_h = int(pil_img.height * (target_w / pil_img.width))
+                        if target_h > 105:
+                            target_h = 105
+                            target_w = int(pil_img.width * (target_h / pil_img.height))
+
+                    resized = pil_img.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                    self.logo_tk = ImageTk.PhotoImage(resized)
+                    break
+                except Exception as e:
+                    print(f"[-] No se pudo procesar escudo/imagen {ruta}: {e}")
 
     def _center_window(self, parent):
         self.update_idletasks()
@@ -64,104 +103,156 @@ class LoginDialog(tk.Toplevel):
         except Exception:
             pw, ph, px, py = 1200, 800, 100, 100
 
-        w, h = 460, 540
+        w, h = 500, 680
         x = px + max(0, (pw - w) // 2)
         y = py + max(0, (ph - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
-        main = tk.Frame(self, bg=self.COLOR_BG, padx=30, pady=24)
+        main = tk.Frame(self, bg=self.COLOR_BG, padx=28, pady=18)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # Encabezado institucional
-        lbl_escudo = tk.Label(main, text="🔐", font=("Helvetica", 38), bg=self.COLOR_BG, fg=self.COLOR_GOLD_ITSX)
-        lbl_escudo.pack(pady=(0, 6))
+        # -------------------------------------------------------------
+        # 1. ENCABEZADO INSTITUCIONAL CON EL ESCUDO DE LA ESCUELA
+        # -------------------------------------------------------------
+        header_frame = tk.Frame(main, bg=self.COLOR_BG)
+        header_frame.pack(fill=tk.X, pady=(0, 10))
 
-        lbl_inst = tk.Label(
-            main, text="INSTITUTO TECNOLÓGICO SUPERIOR DE XALAPA",
+        if self.logo_tk:
+            # Contenedor para el escudo institucional
+            escudo_container = tk.Frame(header_frame, bg=self.COLOR_BG)
+            escudo_container.pack(pady=(0, 6))
+            lbl_logo = tk.Label(escudo_container, image=self.logo_tk, bg=self.COLOR_BG)
+            lbl_logo.pack()
+        else:
+            lbl_escudo = tk.Label(header_frame, text="🏛️", font=("Helvetica", 36), bg=self.COLOR_BG)
+            lbl_escudo.pack(pady=(0, 6))
+
+        tk.Label(
+            header_frame, text="INSTITUTO TECNOLÓGICO SUPERIOR DE XALAPA",
             font=("Helvetica", 11, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG
-        )
-        lbl_inst.pack()
+        ).pack()
 
-        lbl_sys = tk.Label(
-            main, text="Control de Acceso Biométrico Institucional",
-            font=("Helvetica", 12, "bold"), fg="#ffffff", bg=self.COLOR_BG
-        )
-        lbl_sys.pack(pady=(2, 6))
+        tk.Label(
+            header_frame, text="CONTROL DE ACCESO BIOMÉTRICO INSTITUCIONAL",
+            font=("Helvetica", 11, "bold"), fg="#ffffff", bg=self.COLOR_BG
+        ).pack(pady=(2, 2))
 
-        lbl_sub = tk.Label(
-            main, text="Identifíquese con sus credenciales de usuario o administrador",
-            font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_BG
-        )
-        lbl_sub.pack(pady=(0, 18))
+        tk.Label(
+            header_frame, text="TecNM • Taller de Investigación II • Seguridad LFPDPPP",
+            font=("Helvetica", 8), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_BG
+        ).pack()
 
-        # Tarjeta de Formulario
-        card = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID, padx=22, pady=20)
+        # Línea de acento institucional
+        accent_line = tk.Frame(header_frame, bg=self.COLOR_GOLD_ITSX, height=2)
+        accent_line.pack(fill=tk.X, pady=(8, 0))
+
+        # -------------------------------------------------------------
+        # 2. TARJETA DE FORMULARIO DE ACCESO
+        # -------------------------------------------------------------
+        card = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID, padx=22, pady=16)
         card.pack(fill=tk.BOTH, expand=True)
+
+        # Botones de autocompletado rápido de rol
+        pills_frame = tk.Frame(card, bg=self.COLOR_PANEL)
+        pills_frame.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(pills_frame, text="Acceso rápido:", font=("Helvetica", 8, "bold"),
+                 fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_fill_admin = tk.Button(
+            pills_frame, text="👑 Administrador", font=("Helvetica", 8, "bold"),
+            bg=self.COLOR_CARD, fg=self.COLOR_GOLD_ITSX, activebackground="#334155", activeforeground=self.COLOR_GOLD_ITSX,
+            relief=tk.FLAT, padx=9, pady=3, cursor="hand2",
+            command=lambda: self._set_user_pill("admin#ITSX26")
+        )
+        btn_fill_admin.pack(side=tk.LEFT, padx=3)
+
+        btn_fill_op = tk.Button(
+            pills_frame, text="👤 Operador", font=("Helvetica", 8, "bold"),
+            bg=self.COLOR_CARD, fg=self.COLOR_ACCENT, activebackground="#334155", activeforeground=self.COLOR_ACCENT,
+            relief=tk.FLAT, padx=9, pady=3, cursor="hand2",
+            command=lambda: self._set_user_pill("operador#ITSX26")
+        )
+        btn_fill_op.pack(side=tk.LEFT, padx=3)
 
         # Campo Usuario
         tk.Label(
-            card, text="Nombre de Usuario:", font=("Helvetica", 10, "bold"),
+            card, text="Nombre de Usuario Institucional:*", font=("Helvetica", 9, "bold"),
             fg=self.COLOR_TEXT, bg=self.COLOR_PANEL
-        ).pack(anchor=tk.W, pady=(0, 4))
+        ).pack(anchor=tk.W, pady=(0, 3))
 
         self.ent_user = tk.Entry(
-            card, font=("Helvetica", 11), bg=self.COLOR_CARD, fg="#ffffff",
-            insertbackground="#ffffff", relief=tk.FLAT, bd=6
+            card, font=("Helvetica", 11, "bold"), bg=self.COLOR_CARD, fg="#ffffff",
+            insertbackground=self.COLOR_ACCENT, relief=tk.FLAT, bd=6
         )
-        self.ent_user.pack(fill=tk.X, pady=(0, 14))
+        self.ent_user.pack(fill=tk.X, pady=(0, 10))
         self.ent_user.insert(0, "admin#ITSX26")
 
         # Campo Contraseña
         tk.Label(
-            card, text="Contraseña del Sistema:", font=("Helvetica", 10, "bold"),
+            card, text="Contraseña de Acceso:*", font=("Helvetica", 9, "bold"),
             fg=self.COLOR_TEXT, bg=self.COLOR_PANEL
-        ).pack(anchor=tk.W, pady=(0, 4))
+        ).pack(anchor=tk.W, pady=(0, 3))
 
         pass_frame = tk.Frame(card, bg=self.COLOR_CARD, bd=0)
-        pass_frame.pack(fill=tk.X, pady=(0, 6))
+        pass_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.ent_pass = tk.Entry(
             pass_frame, font=("Helvetica", 11), bg=self.COLOR_CARD, fg="#ffffff",
-            insertbackground="#ffffff", relief=tk.FLAT, bd=6, show="•"
+            insertbackground=self.COLOR_ACCENT, relief=tk.FLAT, bd=6, show="•"
         )
         self.ent_pass.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self._show_pass = False
         self.btn_eye = tk.Button(
-            pass_frame, text="👁", font=("Helvetica", 9), bg=self.COLOR_CARD, fg=self.COLOR_TEXT_MUTED,
+            pass_frame, text="👁", font=("Helvetica", 10), bg=self.COLOR_CARD, fg=self.COLOR_TEXT_MUTED,
+            activebackground=self.COLOR_CARD, activeforeground="#ffffff",
             relief=tk.FLAT, cursor="hand2", command=self._toggle_show_pass
         )
-        self.btn_eye.pack(side=tk.RIGHT, padx=4)
+        self.btn_eye.pack(side=tk.RIGHT, padx=6)
 
-        # Label de error
+        # Label de error / retroalimentación
         self.lbl_error = tk.Label(
-            card, text="", font=("Helvetica", 9, "bold"),
-            fg=self.COLOR_RED, bg=self.COLOR_PANEL, wraplength=360, justify=tk.LEFT
+            card, text="", font=("Helvetica", 8, "bold"),
+            fg=self.COLOR_RED, bg=self.COLOR_PANEL, wraplength=410, justify=tk.LEFT
         )
-        self.lbl_error.pack(fill=tk.X, pady=(2, 8))
+        self.lbl_error.pack(fill=tk.X, pady=(0, 6))
 
-        # Botón Iniciar Sesión
+        # Botón Iniciar Sesión (Estilo Destacado con Acento Esmeralda)
         self.btn_login = tk.Button(
-            card, text="🔑  Iniciar Sesión", font=("Helvetica", 11, "bold"),
-            bg=self.COLOR_GREEN, fg="#ffffff", activebackground="#059669",
-            relief=tk.FLAT, pady=10, cursor="hand2", command=self._ejecutar_login
+            card, text="🚀   INGRESAR AL SISTEMA", font=("Helvetica", 11, "bold"),
+            bg=self.COLOR_GREEN_HOVER, fg="#ffffff",
+            activebackground=self.COLOR_GREEN, activeforeground="#ffffff",
+            relief=tk.FLAT, pady=11, cursor="hand2", command=self._ejecutar_login
         )
-        self.btn_login.pack(fill=tk.X, pady=(4, 6))
+        self.btn_login.pack(fill=tk.X, pady=(2, 6))
 
         # Botón Salir
         btn_exit = tk.Button(
-            card, text="Cerrar Aplicación", font=("Helvetica", 9),
-            bg=self.COLOR_PANEL, fg=self.COLOR_TEXT_MUTED, relief=tk.FLAT,
-            cursor="hand2", command=self._on_window_close
+            card, text="✕  Cerrar Aplicación", font=("Helvetica", 9),
+            bg=self.COLOR_PANEL, fg=self.COLOR_TEXT_MUTED,
+            activebackground=self.COLOR_CARD, activeforeground="#ffffff",
+            relief=tk.FLAT, pady=4, cursor="hand2", command=self._on_window_close
         )
-        btn_exit.pack(fill=tk.X)
+        btn_exit.pack(fill=tk.X, pady=(0, 4))
+
+        # Nota de cumplimiento al pie
+        tk.Label(
+            card, text="🔒 Cifrado Biométrico AES-GCM • ResNet-34 • Confidencial",
+            font=("Helvetica", 7), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL
+        ).pack(pady=(4, 0))
 
         # Atajos de teclado
         self.ent_user.bind("<Return>", lambda e: self.ent_pass.focus_set())
         self.ent_pass.bind("<Return>", lambda e: self._ejecutar_login())
         self.bind("<Escape>", lambda e: self._on_window_close())
 
+        self.ent_pass.focus_set()
+
+    def _set_user_pill(self, username: str):
+        self.ent_user.delete(0, tk.END)
+        self.ent_user.insert(0, username)
         self.ent_pass.focus_set()
 
     def _toggle_show_pass(self):
@@ -593,19 +684,25 @@ class AvisoPrivacidadDialog(tk.Toplevel):
 
     def __init__(self, parent):
         super().__init__(parent)
-        self.title("ITSX - Aviso de Privacidad Integral (LFPDPPP)")
-        self.geometry("620x540")
-        self.resizable(False, False)
+        self.title("Aviso de Privacidad Integral — ITSX")
+        self.resizable(True, True)
+        self.minsize(680, 600)
 
-        self.COLOR_BG = "#0B1120"
-        self.COLOR_PANEL = "#151F32"
-        self.COLOR_CARD = "#1E293B"
-        self.COLOR_GOLD_ITSX = "#E5A823"
-        self.COLOR_TEXT = "#F8FAFC"
-        self.COLOR_TEXT_MUTED = "#94A3B8"
-        self.COLOR_GREEN = "#10B981"
+        # Paleta institucional
+        self.BG          = "#0B1120"
+        self.PANEL       = "#151F32"
+        self.CARD        = "#1E293B"
+        self.BORDER      = "#2D3F5C"
+        self.GOLD        = "#E5A823"
+        self.GOLD_LIGHT  = "#F5C84C"
+        self.ACCENT      = "#38BDF8"
+        self.GREEN       = "#10B981"
+        self.RED         = "#F87171"
+        self.TEXT        = "#F1F5F9"
+        self.MUTED       = "#64748B"
+        self.SECTION_CLR = "#0EA5E9"
 
-        self.configure(bg=self.COLOR_BG)
+        self.configure(bg=self.BG)
         self.transient(parent)
         self.grab_set()
 
@@ -615,79 +712,225 @@ class AvisoPrivacidadDialog(tk.Toplevel):
     def _center_window(self, parent):
         self.update_idletasks()
         try:
-            pw, ph, px, py = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
+            pw = parent.winfo_width()
+            ph = parent.winfo_height()
+            px = parent.winfo_x()
+            py = parent.winfo_y()
         except Exception:
-            pw, ph, px, py = 1200, 800, 100, 100
-        w, h = 620, 540
+            pw, ph, px, py = 1280, 800, 80, 80
+        w, h = 720, 620
         x = px + max(0, (pw - w) // 2)
         y = py + max(0, (ph - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
-        main = tk.Frame(self, bg=self.COLOR_BG, padx=22, pady=18)
-        main.pack(fill=tk.BOTH, expand=True)
+        # ── Header con degradado visual ──────────────────────────────────────
+        header = tk.Frame(self, bg=self.PANEL, padx=24, pady=16)
+        header.pack(fill=tk.X)
 
-        header = tk.Frame(main, bg=self.COLOR_BG)
-        header.pack(fill=tk.X, pady=(0, 10))
+        left_h = tk.Frame(header, bg=self.PANEL)
+        left_h.pack(side=tk.LEFT, fill=tk.Y)
 
         tk.Label(
-            header, text="📜 AVISO DE PRIVACIDAD INTEGRAL Y CONSENTIMIENTO INFORMADO",
-            font=("Helvetica", 11, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG
+            left_h,
+            text="🔒  AVISO DE PRIVACIDAD INTEGRAL",
+            font=("Helvetica", 14, "bold"),
+            fg=self.GOLD, bg=self.PANEL
         ).pack(anchor=tk.W)
+
         tk.Label(
-            header, text="Instituto Tecnológico Superior de Xalapa (ITSX) | Sistema de Control de Acceso",
-            font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_BG
-        ).pack(anchor=tk.W)
+            left_h,
+            text="Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP)",
+            font=("Helvetica", 8),
+            fg=self.MUTED, bg=self.PANEL
+        ).pack(anchor=tk.W, pady=(2, 0))
 
-        # Contenedor con texto legal deslizable
-        text_frame = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID)
-        text_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
-
-        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL)
-        txt = tk.Text(
-            text_frame, font=("Helvetica", 9), bg=self.COLOR_PANEL, fg=self.COLOR_TEXT,
-            wrap=tk.WORD, yscrollcommand=scrollbar.set, padx=14, pady=12, bd=0
+        # Etiqueta LFPDPPP al lado derecho
+        badge = tk.Label(
+            header,
+            text=" LFPDPPP\n Arts. 3 · 7 · 13 · 16 ",
+            font=("Helvetica", 8, "bold"),
+            fg=self.BG, bg=self.GOLD,
+            padx=8, pady=4
         )
-        scrollbar.config(command=txt.yview)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        badge.pack(side=tk.RIGHT, padx=(12, 0))
+
+        tk.Label(
+            header,
+            text="Instituto Tecnológico Superior de Xalapa (ITSX)",
+            font=("Helvetica", 9, "bold"),
+            fg=self.ACCENT, bg=self.PANEL
+        ).pack(side=tk.RIGHT)
+
+        # Separador decorativo
+        sep = tk.Frame(self, bg=self.GOLD, height=2)
+        sep.pack(fill=tk.X)
+
+        # ── Área de contenido desplazable ────────────────────────────────────
+        content_frame = tk.Frame(self, bg=self.BG, padx=18, pady=14)
+        content_frame.pack(fill=tk.BOTH, expand=True)
+
+        scroll_y = ttk.Scrollbar(content_frame, orient=tk.VERTICAL)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        txt = tk.Text(
+            content_frame,
+            font=("Helvetica", 9),
+            bg=self.PANEL,
+            fg=self.TEXT,
+            wrap=tk.WORD,
+            yscrollcommand=scroll_y.set,
+            padx=20, pady=16,
+            bd=0,
+            relief=tk.FLAT,
+            cursor="arrow",
+            spacing1=2, spacing3=4
+        )
+        scroll_y.config(command=txt.yview)
         txt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        aviso_texto = (
-            "1. IDENTIDAD Y DOMICILIO DEL RESPONSABLE:\n"
-            "El Instituto Tecnológico Superior de Xalapa (ITSX), con domicilio en Sección 5A Reserva Territorial S/N, "
-            "Xalapa, Veracruz, es responsable del tratamiento de los datos biométricos recabados.\n\n"
-            "2. DATOS PERSONALES SENSIBLES TRATADOS:\n"
-            "En apego al Artículo 3, fracción VI de la LFPDPPP, se tratan datos biométricos consistentes en la "
-            "geometría facial para fines de identificación y control de acceso institucional.\n\n"
-            "3. PRINCIPIO DE MINIMIZACIÓN Y NO ALMACENAMIENTO DE IMÁGENES:\n"
-            "• El sistema NO almacena fotografías, videos ni archivos gráficos de rostros en disco ni base de datos.\n"
-            "• Los fotogramas de captura residen temporalmente en la memoria RAM y son inmediatamente destruidos "
-            "tras la extracción matemática.\n"
-            "• La biometría se almacena exclusivamente como una proyección vectorial matemática unidireccional "
-            "de 128 valores flotantes (1024 bytes), matemáticamente irreversible: a partir de ella resulta "
-            "técnicamente imposible reconstruir la imagen facial original.\n\n"
-            "4. SEGURIDAD Y CIFRADO EN REPOSO:\n"
-            "En cumplimiento del Artículo 13 de la LFPDPPP, los vectores biométricos son resguardados bajo cifrado "
-            "simétrico autenticado (CTR-SHA256 con firma HMAC), impidiendo su lectura o aprovechamiento en caso de "
-            "extracción física no autorizada de la base de datos.\n\n"
-            "5. FINALIDADES DEL TRATAMIENTO:\n"
-            "• Control seguro del flujo de entrada y salida al campus institucional.\n"
-            "• Prevención de suplantación de identidad en instalaciones del ITSX.\n"
-            "• Generación de estadísticas de aforo y tiempos de acceso sin divulgación de identidades.\n\n"
-            "6. EJERCICIO DE DERECHOS ARCO:\n"
-            "El titular o su representante legal pueden solicitar en cualquier momento el Acceso, Rectificación, "
-            "Cancelación u Oposición (Derechos ARCO) respecto a su registro biométrico, lo cual implicará el borrado "
-            "permanente de su vector en el padrón institucional."
+        # Configurar etiquetas de estilo
+        txt.tag_configure("seccion",
+            font=("Helvetica", 10, "bold"),
+            foreground=self.SECTION_CLR,
+            spacing1=10, spacing3=4
         )
-        txt.insert("1.0", aviso_texto)
+        txt.tag_configure("titulo_seccion",
+            font=("Helvetica", 10, "bold"),
+            foreground=self.GOLD,
+        )
+        txt.tag_configure("cuerpo",
+            font=("Helvetica", 9),
+            foreground=self.TEXT,
+            lmargin1=16, lmargin2=16
+        )
+        txt.tag_configure("bullet",
+            font=("Helvetica", 9),
+            foreground=self.TEXT,
+            lmargin1=26, lmargin2=36
+        )
+        txt.tag_configure("bullet_verde",
+            font=("Helvetica", 9, "bold"),
+            foreground=self.GREEN,
+            lmargin1=26, lmargin2=36
+        )
+        txt.tag_configure("bullet_rojo",
+            font=("Helvetica", 9),
+            foreground=self.RED,
+            lmargin1=26, lmargin2=36
+        )
+        txt.tag_configure("muted",
+            font=("Helvetica", 8, "italic"),
+            foreground=self.MUTED,
+            lmargin1=16, lmargin2=16,
+            spacing3=8
+        )
+
+        # ── Contenido estructurado ───────────────────────────────────────────
+        secciones = [
+            (
+                "1.  IDENTIDAD Y DOMICILIO DEL RESPONSABLE",
+                [
+                    ("cuerpo",
+                     "El Instituto Tecnológico Superior de Xalapa (ITSX), con domicilio en "
+                     "Sección 5A Reserva Territorial S/N, Xalapa, Veracruz, C.P. 91097, es "
+                     "responsable del tratamiento de los datos biométricos recabados mediante "
+                     "el presente sistema de control de acceso facial."),
+                ]
+            ),
+            (
+                "2.  DATOS PERSONALES SENSIBLES QUE SE TRATAN",
+                [
+                    ("cuerpo",
+                     "En apego al Artículo 3, fracción VI de la LFPDPPP, el sistema recaba "
+                     "datos biométricos consistentes en la geometría facial del portador para "
+                     "fines exclusivos de identificación y control de acceso institucional."),
+                    ("bullet", "• Geometría facial (proyección matemática 128-dimensional)"),
+                    ("bullet", "• Matrícula institucional y nombre completo del estudiante"),
+                    ("bullet", "• Registros de fecha, hora y resultado del acceso"),
+                ]
+            ),
+            (
+                "3.  PRINCIPIO DE MINIMIZACIÓN — CERO IMÁGENES ALMACENADAS",
+                [
+                    ("bullet_rojo",
+                     "✗  El sistema NO almacena fotografías, videos ni archivos gráficos en disco."),
+                    ("bullet_verde",
+                     "✓  Los fotogramas de captura residen únicamente en la RAM y son destruidos "
+                     "inmediatamente tras la extracción matemática."),
+                    ("bullet_verde",
+                     "✓  La biometría se persiste exclusivamente como una proyección vectorial "
+                     "de 128 valores flotantes (1 024 bytes), matemáticamente irreversible."),
+                    ("muted",
+                     "A partir del vector biométrico almacenado resulta técnicamente imposible "
+                     "reconstruir la imagen facial original."),
+                ]
+            ),
+            (
+                "4.  SEGURIDAD Y CIFRADO EN REPOSO",
+                [
+                    ("cuerpo",
+                     "En cumplimiento del Artículo 13 de la LFPDPPP, los vectores biométricos "
+                     "se protegen mediante cifrado simétrico autenticado antes de ser escritos "
+                     "en la base de datos:"),
+                    ("bullet_verde", "✓  Algoritmo:  CTR-SHA256 con firma de autenticidad HMAC-SHA256"),
+                    ("bullet_verde", "✓  Clave derivada de forma segura por sesión (HKDF-Expand)"),
+                    ("bullet_verde", "✓  Sin posibilidad de lectura útil en caso de extracción física no autorizada"),
+                ]
+            ),
+            (
+                "5.  FINALIDADES DEL TRATAMIENTO",
+                [
+                    ("bullet", "• Control seguro del flujo de entrada y salida al campus institucional."),
+                    ("bullet", "• Prevención de suplantación de identidad en instalaciones del ITSX."),
+                    ("bullet", "• Generación de estadísticas de aforo y tiempos de acceso sin divulgación de identidades individuales."),
+                    ("bullet", "• Cumplimiento de obligaciones de auditoría interna institucional."),
+                ]
+            ),
+            (
+                "6.  EJERCICIO DE DERECHOS ARCO",
+                [
+                    ("cuerpo",
+                     "El titular o su representante legal puede solicitar en cualquier momento "
+                     "el ejercicio de los Derechos de Acceso, Rectificación, Cancelación u "
+                     "Oposición (Derechos ARCO) ante el Departamento de Sistemas del ITSX."),
+                    ("bullet", "• La solicitud implicará el borrado permanente e irrecuperable del vector biométrico del padrón."),
+                    ("bullet", "• El ejercicio es gratuito, responderemos en un plazo no mayor a 20 días hábiles."),
+                ]
+            ),
+        ]
+
+        for titulo, items in secciones:
+            txt.insert(tk.END, f"\n{titulo}\n", "seccion")
+            for tag, contenido in items:
+                txt.insert(tk.END, f"{contenido}\n", tag)
+
         txt.config(state=tk.DISABLED)
 
-        btn_box = tk.Frame(main, bg=self.COLOR_BG)
-        btn_box.pack(fill=tk.X)
+        # ── Pie de página ────────────────────────────────────────────────────
+        sep2 = tk.Frame(self, bg=self.BORDER, height=1)
+        sep2.pack(fill=tk.X)
+
+        footer = tk.Frame(self, bg=self.PANEL, padx=20, pady=12)
+        footer.pack(fill=tk.X)
+
+        tk.Label(
+            footer,
+            text="Al marcar 'Acepto el Aviso de Privacidad' en el formulario de registro, el titular otorga su consentimiento libre, informado y expreso.",
+            font=("Helvetica", 8, "italic"),
+            fg=self.MUTED, bg=self.PANEL,
+            wraplength=480, justify=tk.LEFT
+        ).pack(side=tk.LEFT)
 
         tk.Button(
-            btn_box, text="Entendido y Cerrar", font=("Helvetica", 10, "bold"),
-            bg=self.COLOR_GOLD_ITSX, fg="#000000", relief=tk.FLAT, padx=18, pady=7,
-            cursor="hand2", command=self.destroy
+            footer,
+            text="  ✓  Entendido y Cerrar  ",
+            font=("Helvetica", 10, "bold"),
+            bg=self.GOLD, fg="#000000",
+            activebackground=self.GOLD_LIGHT, activeforeground="#000000",
+            relief=tk.FLAT, padx=14, pady=6,
+            cursor="hand2",
+            command=self.destroy
         ).pack(side=tk.RIGHT)
+
 

@@ -1,1 +1,9 @@
 python3 main.py
+
+1. Rol Administrador (Acceso Total)
+Usuario: admin#ITSX26
+Contraseña: Admin#2026ITSX
+
+2. Rol Operador (Guardia de Seguridad)
+Usuario: operador#ITSX26
+Contraseña: Operador#2026ITSX
