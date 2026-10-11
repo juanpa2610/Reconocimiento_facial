@@ -1676,7 +1676,7 @@ class GuardApp:
             return
 
         ok, msg = self.db.update_estudiante(
-            matricula=matricula,
+            matricula_actual=matricula,
             nuevo_nombre=dlg.nuevo_nombre,
             nueva_carrera=dlg.nueva_carrera,
             admin_username=admin_user,

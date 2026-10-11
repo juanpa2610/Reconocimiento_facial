@@ -820,34 +820,40 @@ class Database:
 
     def update_estudiante(
         self,
-        matricula_actual: str,
-        nuevo_nombre: str,
-        nueva_carrera: str,
+        matricula_actual: Optional[str] = None,
+        nuevo_nombre: str = "",
+        nueva_carrera: str = "",
         admin_username: Optional[str] = None,
         admin_password: Optional[str] = None,
         nueva_matricula: Optional[str] = None,
-        nuevo_embedding: Optional[np.ndarray] = None
+        nuevo_embedding: Optional[np.ndarray] = None,
+        matricula: Optional[str] = None
     ) -> Tuple[bool, str]:
         """
         Modifica los datos o biometría de un estudiante registrado.
         Requiere validación obligatoria de credenciales de Administrador en la capa de datos.
+        Acepta tanto 'matricula_actual' como 'matricula'.
         """
+        mat_origen = matricula_actual or matricula
+        if not mat_origen:
+            return False, "Debe especificar la matrícula del estudiante a modificar."
+
         ok_admin, admin_obj, msg = self.verificar_credenciales_admin(admin_username, admin_password)
         if not ok_admin:
             self.log_auditoria(
                 admin_username or "ANONIMO",
                 "MODIFICAR_ESTUDIANTE",
                 "ESTUDIANTE",
-                f"Intento no autorizado de modificar matrícula {matricula_actual}: {msg}",
+                f"Intento no autorizado de modificar matrícula {mat_origen}: {msg}",
                 "FALLIDO_AUTENTICACION"
             )
             return False, msg
 
-        est = self.get_estudiante_by_matricula(matricula_actual)
+        est = self.get_estudiante_by_matricula(mat_origen)
         if not est:
-            return False, f"No se encontró ningún estudiante con matrícula {matricula_actual}."
+            return False, f"No se encontró ningún estudiante con matrícula {mat_origen}."
 
-        mat_final = nueva_matricula.strip() if nueva_matricula else matricula_actual
+        mat_final = nueva_matricula.strip() if nueva_matricula else mat_origen
         nom_final = nuevo_nombre.strip() if nuevo_nombre else est.nombre
         car_final = nueva_carrera.strip() if nueva_carrera else est.carrera
 
