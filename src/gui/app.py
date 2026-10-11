@@ -1360,20 +1360,46 @@ class GuardApp:
             messagebox.showinfo("Activada", f"Cámara '{cam.nombre}' ahora es la activa.")
 
     def _probar_conexion_camara(self):
-        """Prueba la conexión a la cámara usando la utilidad async y muestra el resultado."""
-        # Obtener datos del formulario (no se requieren credenciales admin para prueba)
+        """Prueba la conexión a la cámara en un hilo secundario y muestra el resultado."""
         ip = self.ent_cam_ip.get().strip()
-        puerto = int(self.ent_cam_puerto.get().strip() or 554)
+        if not ip:
+            messagebox.showwarning("Campo requerido", "Ingrese la dirección IP o índice de la cámara.")
+            return
+
+        try:
+            puerto = int(self.ent_cam_puerto.get().strip() or 554)
+        except ValueError:
+            puerto = 554
+
         ruta = self.ent_cam_rtsp.get().strip() or "/stream2"
         user = self.ent_cam_user.get().strip()
         pwd = self.ent_cam_pass.get().strip()
-        url = build_rtsp_url(ip, puerto, ruta, user, pwd) if ip and ip not in ("0", "") else ip
-        try:
-            import asyncio
-            resultado = asyncio.run(test_camera_connection_async(url))
-        except Exception as e:
-            resultado = f"Error al probar conexión: {e}"
-        messagebox.showinfo("Prueba de Conexión", resultado)
+
+        # Mostrar indicador de progreso mientras se prueba
+        self.lbl_status.config(text="⏳ Probando conexión con la cámara...", fg=self.COLOR_GOLD_ITSX)
+        self.root.update_idletasks()
+
+        def _on_resultado(resultado):
+            exito, mensaje, resolucion, fps = resultado
+            if exito:
+                res_str = f"{resolucion[0]}x{resolucion[1]} px" if resolucion else "desconocida"
+                texto = f"✅ Conexión exitosa\n\nResolución: {res_str}\nFPS: ~{fps:.0f}\n\n{mensaje}"
+                self.root.after(0, lambda: [
+                    messagebox.showinfo("Prueba de Conexión", texto),
+                    self.lbl_status.config(
+                        text="🟢 Sistema Biométrico ITSX Operativo", fg=self.COLOR_GREEN
+                    )
+                ])
+            else:
+                self.root.after(0, lambda: [
+                    messagebox.showerror("Prueba de Conexión", f"❌ Sin conexión\n\n{mensaje}"),
+                    self.lbl_status.config(
+                        text="🔴 Prueba de cámara fallida", fg=self.COLOR_RED
+                    )
+                ])
+
+        # Llamada correcta: ip, user, password, port, ruta, callback
+        test_camera_connection_async(ip, user, pwd, puerto, ruta, _on_resultado)
 
     # -------------------------------------------------------------------------
     # PESTAÑA 5: SEGURIDAD Y AUDITORÍA (ADMIN)
@@ -1449,22 +1475,87 @@ class GuardApp:
         )
         self._cargar_tablas_bitacora()
 
-    def _eliminar_alumno_seleccionado(self):
+    def _editar_alumno_seleccionado(self):
+        """Abre el diálogo de edición para el alumno seleccionado en el padrón."""
         seleccion = self.tree_estudiantes.selection()
         if not seleccion:
             messagebox.showinfo("Aviso", "Por favor seleccione un estudiante del padrón.")
             return
 
         item = self.tree_estudiantes.item(seleccion[0])
-        matricula = item["values"][1]
-        nombre = item["values"][2]
+        matricula = str(item["values"][1])
 
-        if messagebox.askyesno("Confirmar Baja", f"¿Desea dar de baja a {nombre} ({matricula}) del padrón institucional?"):
-            if self.db.delete_estudiante(matricula):
-                messagebox.showinfo("Baja Confirmada", f"El alumno {nombre} y su vector fueron eliminados.")
-                self._recargar_alumnos()
-            else:
-                messagebox.showerror("Error", "No se pudo eliminar el registro.")
+        # Buscar el objeto Estudiante completo
+        estudiante = next((e for e in self.estudiantes if str(e.matricula) == matricula), None)
+        if not estudiante:
+            messagebox.showerror("Error", "No se encontró el registro del estudiante.")
+            return
+
+        # Mostrar diálogo de edición
+        dlg = EditEstudianteDialog(self.root, estudiante, CARRERAS_ITSX)
+        dlg.wait_window()
+
+        if not dlg.confirmado:
+            return
+
+        # Solicitar credenciales de administrador para autorizar
+        autorizado, admin_user, admin_pass = ConfirmAdminDialog.solicitar(
+            parent=self.root,
+            db=self.db,
+            accion_titulo=f"Modificar datos de: {estudiante.nombre}",
+            mensaje_detalles=f"Matrícula: {matricula}\nNombre nuevo: {dlg.nuevo_nombre}\nCarrera: {dlg.nueva_carrera}"
+        )
+        if not autorizado:
+            messagebox.showwarning("Cancelado", "Operación cancelada. Se requieren credenciales de administrador.")
+            return
+
+        ok, msg = self.db.update_estudiante(
+            matricula=matricula,
+            nuevo_nombre=dlg.nuevo_nombre,
+            nueva_carrera=dlg.nueva_carrera,
+            admin_username=admin_user,
+            admin_password=admin_pass
+        )
+        if ok:
+            messagebox.showinfo("Actualizado", msg)
+            self._recargar_alumnos()
+        else:
+            messagebox.showerror("Error", msg)
+
+    def _eliminar_alumno_seleccionado(self):
+        """Elimina el alumno seleccionado del padrón, requiriendo credenciales de administrador."""
+        seleccion = self.tree_estudiantes.selection()
+        if not seleccion:
+            messagebox.showinfo("Aviso", "Por favor seleccione un estudiante del padrón.")
+            return
+
+        item = self.tree_estudiantes.item(seleccion[0])
+        matricula = str(item["values"][1])
+        nombre = str(item["values"][2])
+
+        if not messagebox.askyesno(
+            "Confirmar Baja",
+            f"¿Desea dar de baja a {nombre} ({matricula}) del padrón institucional?\n\nEsta acción requiere credenciales de administrador."
+        ):
+            return
+
+        # Exigir credenciales admin antes de eliminar
+        autorizado, admin_user, admin_pass = ConfirmAdminDialog.solicitar(
+            parent=self.root,
+            db=self.db,
+            accion_titulo=f"Eliminar alumno: {nombre}",
+            mensaje_detalles=f"Matrícula: {matricula}\nEsta acción eliminará permanentemente el vector biométrico y el registro."
+        )
+        if not autorizado:
+            messagebox.showwarning("Cancelado", "Operación cancelada.")
+            return
+
+        ok = self.db.delete_estudiante(matricula, admin_username=admin_user, admin_password=admin_pass)
+        if ok:
+            messagebox.showinfo("Baja Confirmada", f"El alumno {nombre} y su vector fueron eliminados del padrón.")
+            self._recargar_alumnos()
+        else:
+            messagebox.showerror("Error", "No se pudo eliminar el registro. Verifique las credenciales de administrador.")
 
     def _exportar_csv(self):
         filename = filedialog.asksaveasfilename(

@@ -82,8 +82,30 @@ class FaceMatcher:
         """
         Compara un embedding en vivo directamente contra la matriz persistida en caché.
         Alcanza latencias inferiores a 0.5 milisegundos para cientos de estudiantes.
+        Valida dimensión y valores finitos antes de operar para evitar excepciones de NumPy.
         """
         if self._cached_matrix is None or len(self._cached_students) == 0:
+            return MatchResult(
+                reconocido=False,
+                estudiante=None,
+                distancia=1.0,
+                umbral=self.threshold,
+                confianza_pct=0.0
+            )
+
+        # Validar que el vector candidato tenga la dimensión esperada (128)
+        expected_dim = config.VECTOR_DIMENSION
+        if candidate_embedding is None or candidate_embedding.shape != (expected_dim,):
+            return MatchResult(
+                reconocido=False,
+                estudiante=None,
+                distancia=1.0,
+                umbral=self.threshold,
+                confianza_pct=0.0
+            )
+
+        # Validar que no contenga NaN ni Inf (vector corrupto o de detección fallida)
+        if not np.all(np.isfinite(candidate_embedding)):
             return MatchResult(
                 reconocido=False,
                 estudiante=None,
