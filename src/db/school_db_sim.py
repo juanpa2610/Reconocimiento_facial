@@ -14,7 +14,107 @@ import config
 
 # Directorio institucional predefinido con registros representativos del ITSX
 REGISTROS_INICIALES = [
-    # --- ALUMNOS (Ingeniería en Sistemas Computacionales) ---
+    # --- ALUMNOS (Ingeniería en Sistemas Computacionales - Solicitados) ---
+    {
+        "numero_control": "237O00526",
+        "nombre_completo": "DIEGO CAPISTRAN ORTIZ",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O01367",
+        "nombre_completo": "DANAE VILLA HERNÁNDEZ",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00470",
+        "nombre_completo": "ARIADNA SARAI SANTIAGO ORTEGA",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O02104",
+        "nombre_completo": "AXEL MAURITZIO RODRIGUEZ FLORES",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00868",
+        "nombre_completo": "ISMAEL BAIZABAL ACOSTA",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00327",
+        "nombre_completo": "RICARDO HERNANDEZ RODRÍGUEZ",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+
+    # --- ALUMNOS (Ingeniería en Sistemas Computacionales - Integrantes del Equipo) ---
+    {
+        "numero_control": "237O00728",
+        "nombre_completo": "Trujillo Trujillo Juan Pablo",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00386",
+        "nombre_completo": "Bello Franco Samantha",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00955",
+        "nombre_completo": "Martínez Vera Josué Aldair",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O03473",
+        "nombre_completo": "Morales Hernández Guadalupe Aleida",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00598",
+        "nombre_completo": "Solís Contreras Darian Giselle",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+    {
+        "numero_control": "237O00483",
+        "nombre_completo": "Velázquez López Guadalupe",
+        "tipo_usuario": "Alumno",
+        "carrera_o_departamento": "Ingeniería en Sistemas Computacionales",
+        "semestre": "6to Semestre",
+        "estatus": "ACTIVO"
+    },
+
+    # --- ALUMNOS (Ingeniería en Sistemas Computacionales - Catálogo Adicional) ---
     {
         "numero_control": "208O0123",
         "nombre_completo": "Juan Pablo Pérez López",
@@ -205,27 +305,23 @@ class SchoolDatabaseSim:
                 )
             """)
 
-            cursor.execute("SELECT COUNT(*) FROM simulacion_escolar_itsx")
-            count = cursor.fetchone()[0]
-
-            if count == 0:
-                for reg in REGISTROS_INICIALES:
-                    try:
-                        cursor.execute("""
-                            INSERT INTO simulacion_escolar_itsx
-                            (numero_control, nombre_completo, tipo_usuario, carrera_o_departamento, semestre, estatus)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                        """, (
-                            reg["numero_control"].upper().strip(),
-                            reg["nombre_completo"].strip(),
-                            reg["tipo_usuario"],
-                            reg["carrera_o_departamento"],
-                            reg.get("semestre", "Activo"),
-                            reg.get("estatus", "ACTIVO")
-                        ))
-                    except sqlite3.IntegrityError:
-                        pass
-                conn.commit()
+            for reg in REGISTROS_INICIALES:
+                try:
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO simulacion_escolar_itsx
+                        (numero_control, nombre_completo, tipo_usuario, carrera_o_departamento, semestre, estatus)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                    """, (
+                        reg["numero_control"].upper().strip(),
+                        reg["nombre_completo"].strip(),
+                        reg["tipo_usuario"],
+                        reg["carrera_o_departamento"],
+                        reg.get("semestre", "Activo"),
+                        reg.get("estatus", "ACTIVO")
+                    ))
+                except sqlite3.IntegrityError:
+                    pass
+            conn.commit()
 
     def buscar_por_control(self, numero_control: str) -> Optional[Dict]:
         """
