@@ -344,58 +344,48 @@ class Database:
     # -------------------------------------------------------------------------
     def _seed_default_users(self):
         """
-        Crea usuarios iniciales solo si están expresamente definidos en .env
-        y la base de datos no contiene usuarios previos. No contiene contraseñas fijas en código.
+        Siembra o sincroniza los usuarios oficiales institucionales del sistema SCAB - ITSX
+        (6 Administradores del equipo + 1 Operador de guardia).
         """
-        admin_user = os.getenv("ADMIN_USER")
-        admin_pass = os.getenv("ADMIN_PASS")
-        admin_name = os.getenv("ADMIN_NAME", "Administrador Principal")
+        usuarios_seed = [
+            ("SAMANTHA_ITSX", "SAMANTHA_237O00386", "Bello Franco Samantha", "administrador"),
+            ("JOSUE_ITSX", "JOSUE_237O00955", "Martínez Vera Josué Aldair", "administrador"),
+            ("ALEIDA_ITSX", "ALEIDA_237O03473", "Morales Hernández Guadalupe Aleida", "administrador"),
+            ("DARIAN_ITSX", "DARIAN_237O00598", "Solís Contreras Darian Giselle", "administrador"),
+            ("JUANPA_ITSX", "JUANPA_237O00728", "Trujillo Trujillo Juan Pablo", "administrador"),
+            ("GUADALUPE_ITSX", "GUADALUPE_237O00483", "Velázquez López Guadalupe", "administrador"),
+            ("OPERADOR_ITSX", "OPERADOR_ITSX2026", "Operador de Guardia SCAB", "operador"),
+        ]
 
-        operador_user = os.getenv("OPERADOR_USER")
-        operador_pass = os.getenv("OPERADOR_PASS")
-        operador_name = os.getenv("OPERADOR_NAME", "Operador de Guardia")
-
-        if not admin_user or not admin_pass:
-            return
+        env_admin_u = os.getenv("ADMIN_USER")
+        env_admin_p = os.getenv("ADMIN_PASS")
+        if env_admin_u and env_admin_p and env_admin_u not in [u[0] for u in usuarios_seed]:
+            usuarios_seed.append((env_admin_u, env_admin_p, os.getenv("ADMIN_NAME", "Admin Principal"), "administrador"))
 
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
                 with conn.cursor() as cursor:
-                    cursor.execute("SELECT COUNT(*) FROM usuarios;")
-                    count = cursor.fetchone()[0]
-                    if count == 0:
-                        h_admin = hash_password(admin_pass)
-                        cursor.execute("""
-                            INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                            VALUES (%s, %s, %s, 'administrador', TRUE);
-                        """, (admin_user, h_admin, admin_name))
-                        if operador_user and operador_pass:
-                            h_oper = hash_password(operador_pass)
+                    for u, p, n, r in usuarios_seed:
+                        cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(%s);", (u,))
+                        if not cursor.fetchone():
+                            hp = hash_password(p)
                             cursor.execute("""
                                 INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                                VALUES (%s, %s, %s, 'operador', TRUE);
-                            """, (operador_user, h_oper, operador_name))
-                        conn.commit()
-                        self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde .env", "EXITO")
+                                VALUES (%s, %s, %s, %s, TRUE);
+                            """, (u, hp, n, r))
+                    conn.commit()
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM usuarios")
-                count = cursor.fetchone()[0]
-                if count == 0:
-                    h_admin = hash_password(admin_pass)
-                    cursor.execute("""
-                        INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                        VALUES (?, ?, ?, 'administrador', 1);
-                    """, (admin_user, h_admin, admin_name))
-                    if operador_user and operador_pass:
-                        h_oper = hash_password(operador_pass)
+                for u, p, n, r in usuarios_seed:
+                    cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(?)", (u,))
+                    if not cursor.fetchone():
+                        hp = hash_password(p)
                         cursor.execute("""
                             INSERT INTO usuarios (username, password_hash, nombre_completo, rol, activo)
-                            VALUES (?, ?, ?, 'operador', 1);
-                        """, (operador_user, h_oper, operador_name))
-                    conn.commit()
-                    self.log_auditoria("SISTEMA", "CREAR_USUARIO", "USUARIO", f"Usuario administrador inicial '{admin_user}' creado desde .env", "EXITO")
+                            VALUES (?, ?, ?, ?, 1)
+                        """, (u, hp, n, r))
+                conn.commit()
 
     def count_usuarios(self) -> int:
         """Retorna la cantidad total de usuarios registrados en el sistema."""
@@ -543,7 +533,7 @@ class Database:
             with self._get_postgres_connection() as conn:
                 with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
                     cursor.execute(
-                        "SELECT id, username, password_hash, nombre_completo, rol, activo, created_at FROM usuarios WHERE username = %s AND activo = TRUE",
+                        "SELECT id, username, password_hash, nombre_completo, rol, activo, created_at FROM usuarios WHERE UPPER(username) = UPPER(%s) AND activo = TRUE",
                         (user_clean,)
                     )
                     row = cursor.fetchone()
@@ -551,7 +541,7 @@ class Database:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute(
-                    "SELECT id, username, password_hash, nombre_completo, rol, activo, created_at FROM usuarios WHERE username = ? AND activo = 1",
+                    "SELECT id, username, password_hash, nombre_completo, rol, activo, created_at FROM usuarios WHERE UPPER(username) = UPPER(?) AND activo = 1",
                     (user_clean,)
                 )
                 row = cursor.fetchone()
