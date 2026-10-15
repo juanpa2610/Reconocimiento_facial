@@ -213,17 +213,34 @@ class Visualizer:
     ):
         """Dibuja el recuadro y etiqueta para un rostro individual en tiempo real."""
         top, right, bottom, left = box
+        # Definir color según autorización
         color = Visualizer.COLOR_SUCCESS if es_autorizado else Visualizer.COLOR_DANGER
+        text_color = (0, 0, 0) if es_autorizado else (255, 255, 255)
 
-        cv2.rectangle(frame, (left, top), (right, bottom), color, 2)
+        # Grosor y tamaño de letra adaptables a la resolución (para que no se vea miniatura en HD)
+        h_frame, w_frame = frame.shape[:2]
+        factor = max(1.0, w_frame / 960.0)
+        thickness_box = max(2, int(round(2.5 * factor)))
+        font_scale = max(0.65, 0.65 * factor)
+        thickness_text = max(1, int(round(1.8 * factor)))
 
-        # Etiqueta sobre el rostro
-        label = f"{nombre[:15]} ({distancia:.2f})" if es_autorizado else f"No registrado ({distancia:.2f})"
-        (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        cv2.rectangle(frame, (left, top), (right, bottom), color, thickness_box)
 
-        y_label = max(top - 8, th + 8)
-        cv2.rectangle(frame, (left, y_label - th - 6), (left + tw + 10, y_label + 4), color, -1)
-        cv2.putText(
-            frame, label, (left + 5, y_label - 2),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA
+        # Etiqueta sobre el rostro más clara y legible
+        label = f"{nombre} ({distancia:.2f})" if es_autorizado else f"No registrado ({distancia:.2f})"
+        (tw, th), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness_text)
+
+        padding = int(6 * factor)
+        y_label = max(top - padding, th + padding + 4)
+        cv2.rectangle(
+            frame,
+            (left, y_label - th - padding),
+            (left + tw + (padding * 2), y_label + baseline),
+            color,
+            -1
         )
+        cv2.putText(
+            frame, label, (left + padding, y_label - 2),
+            cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness_text, cv2.LINE_AA
+        )
+

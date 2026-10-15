@@ -1189,8 +1189,8 @@ class GuardApp:
                     self._procesar_cuadro_acceso(frame)
                 elif current_tab == 1:
                     self._procesar_cuadro_registro(frame)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[!] Error procesando frame en loop: {e}")
 
         self.root.after(10, self._loop_camara)
 
@@ -1277,10 +1277,13 @@ class GuardApp:
 
         # Dibujar siempre las cajas en caché sobre el cuadro actual (video fluido entre detecciones)
         for det in self._cache_acceso:
-            Visualizer.draw_recognition_box(
-                frame=frame, box=det["box"], nombre=det["nombre"], matricula=det["matricula"],
-                distancia=det["distancia"], confianza=det["confianza"], es_autorizado=det["auth"]
-            )
+            try:
+                Visualizer.draw_recognition_box(
+                    frame=frame, box=det["box"], nombre=det["nombre"], matricula=det["matricula"],
+                    distancia=det["distancia"], confianza=det["confianza"], es_autorizado=det["auth"]
+                )
+            except Exception as e:
+                print(f"[!] Error al dibujar recuadro facial: {e}")
 
         self._renderizar_tarjeta_acceso(ahora)
         self._mostrar_en_label(frame, self.video_label_acceso)
@@ -1380,7 +1383,8 @@ class GuardApp:
         new_w = max(10, int(w * scale))
         new_h = max(10, int(h * scale))
 
-        resized = cv2.resize(frame, (new_w, new_h))
+        interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+        resized = cv2.resize(frame, (new_w, new_h), interpolation=interp)
         rgb_img = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         img_pil = Image.fromarray(rgb_img)
         img_tk = ImageTk.PhotoImage(image=img_pil)
@@ -2070,27 +2074,32 @@ class GuardApp:
         self.lbl_status.config(text="⏳ Probando conexión con la cámara...", fg=self.COLOR_GOLD_ITSX)
         self.root.update_idletasks()
 
+        # Tkinter NO es thread-safe: llamar root.after() desde otro hilo puede
+        # provocar 'Violación de segmento'. El hilo solo deposita el resultado en
+        # una cola y el hilo principal la revisa periódicamente.
+        resultado_q: "queue.Queue" = queue.Queue(maxsize=1)
+
         def _on_resultado(resultado):
-            exito, mensaje, resolucion, fps = resultado
+            resultado_q.put(resultado)
+
+        def _revisar_resultado():
+            try:
+                exito, mensaje, resolucion, fps = resultado_q.get_nowait()
+            except queue.Empty:
+                self.root.after(150, _revisar_resultado)
+                return
             if exito:
                 res_str = f"{resolucion[0]}x{resolucion[1]} px" if resolucion else "desconocida"
-                texto = f"✅ Conexión exitosa\n\nResolución: {res_str}\nFPS: ~{fps:.0f}\n\n{mensaje}"
-                self.root.after(0, lambda: [
-                    messagebox.showinfo("Prueba de Conexión", texto),
-                    self.lbl_status.config(
-                        text="🟢 Sistema Biométrico ITSX Operativo", fg=self.COLOR_GREEN
-                    )
-                ])
+                messagebox.showinfo("Prueba de Conexión",
+                                    f"✅ Conexión exitosa\n\nResolución: {res_str}\nFPS: ~{fps:.0f}\n\n{mensaje}")
+                self.lbl_status.config(text="🟢 Sistema Biométrico ITSX Operativo", fg=self.COLOR_GREEN)
             else:
-                self.root.after(0, lambda: [
-                    messagebox.showerror("Prueba de Conexión", f"❌ Sin conexión\n\n{mensaje}"),
-                    self.lbl_status.config(
-                        text="🔴 Prueba de cámara fallida", fg=self.COLOR_RED
-                    )
-                ])
+                messagebox.showerror("Prueba de Conexión", f"❌ Sin conexión\n\n{mensaje}")
+                self.lbl_status.config(text="🔴 Prueba de cámara fallida", fg=self.COLOR_RED)
 
         # Llamada correcta: ip, user, password, port, ruta, callback
         test_camera_connection_async(ip, user, pwd, puerto, ruta, _on_resultado)
+        self.root.after(150, _revisar_resultado)
 
     # -------------------------------------------------------------------------
     # PESTAÑA 5: SEGURIDAD Y AUDITORÍA (ADMIN)
