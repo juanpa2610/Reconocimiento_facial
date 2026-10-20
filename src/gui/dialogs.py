@@ -24,9 +24,14 @@ class LoginDialog(tk.Toplevel):
     Valida credenciales contra la base de datos con contraseñas hasheadas (PBKDF2-HMAC-SHA256).
     """
 
-    def __init__(self, parent: tk.Tk, db: Database, on_success, on_cancel=None):
-        super().__init__(parent)
-        self.db = db
+    def __init__(self, parent=None, db: Database = None, on_success = None, on_cancel=None):
+        if parent is not None:
+            super().__init__(parent)
+        else:
+            # Si no hay padre, se crea un Toplevel desacoplado
+            super().__init__()
+        self.parent = parent
+        self.db = db if db is not None else Database()
         self.on_success = on_success
         self.on_cancel = on_cancel
         self.user_authenticated = False
@@ -53,13 +58,20 @@ class LoginDialog(tk.Toplevel):
         self.logo_tk = None
         self._cargar_escudo_itsx()
 
-        # Modalidad
-        self.transient(parent)
-        self.grab_set()
+        # Modalidad: Si el padre existe y está visible/mapeado, anclarlo como transient
+        try:
+            if parent is not None and hasattr(parent, "winfo_ismapped") and parent.winfo_ismapped():
+                self.transient(parent)
+                self.grab_set()
+        except Exception:
+            pass
         self.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         self._build_ui()
         self._center_window(parent)
+        self.deiconify()
+        self.lift()
+        self.focus_force()
 
     def _cargar_escudo_itsx(self):
         """Carga el escudo oficial del ITSX en alta definición desde la carpeta assets."""

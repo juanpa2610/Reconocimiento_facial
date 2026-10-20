@@ -76,7 +76,7 @@ CARRERAS_ITSX = [
 
 
 class GuardApp:
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, current_user: Optional[Usuario] = None):
         self.root = root
         self.root.title("ITSX - Sistema Biométrico de Control de Acceso Institucional")
         self.root.geometry("1260x820")
@@ -95,13 +95,11 @@ class GuardApp:
         self.COLOR_ACCENT = "#38BDF8"      # Cyan tecnológico
 
         self.root.configure(bg=self.COLOR_BG)
-        # Ocultar la ventana principal hasta que el usuario se autentique
-        self.root.withdraw()
 
         # Base de datos y autenticación
         self.db = Database()
         self.db.init_db()
-        self.current_user: Optional[Usuario] = None
+        self.current_user: Optional[Usuario] = current_user
 
         # Motor biométrico
         self.encoder = FaceEncoder(model=config.DETECTION_MODEL)
@@ -173,11 +171,21 @@ class GuardApp:
         # Iniciar reloj institucional
         self._actualizar_reloj()
 
-        # Programar pantalla de Login obligatoria al iniciar
-        self.root.after(100, self._mostrar_login)
+        # Si ya se autenticó previamente (flujo de login exclusivo inicial)
+        if self.current_user:
+            self._aplicar_permisos_usuario()
+            self.root.after(150, self._iniciar_camara_segura)
+        else:
+            # Programar pantalla de Login modal si se llamó directamente
+            self.root.after(100, self._mostrar_login)
 
         # Evento de cierre
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _iniciar_camara_segura(self):
+        if not self._camera_started:
+            self._iniciar_camara()
+            self._camera_started = True
 
     def _cargar_recursos(self):
         """Carga y procesa el escudo y logotipo oficial del ITSX en alta calidad."""
@@ -2625,10 +2633,62 @@ class GuardApp:
 
 
 def iniciar_gui():
-    """Punto de entrada de la aplicación gráfica del ITSX."""
-    root = tk.Tk()
-    app = GuardApp(root)
-    root.mainloop()
+    """
+    Punto de entrada de la aplicación gráfica del ITSX.
+    Garantiza que la pantalla de inicio de sesión aparezca sola en primer plano.
+    La interfaz completa del sistema se inicializa y muestra únicamente tras validar credenciales.
+    """
+    db = Database()
+    db.init_db()
+
+    usuario_autenticado = {"user": None}
+
+    # 1. Ventana de Inicio de Sesión
+    login_win = tk.Tk()
+    login_win.title("ITSX - Control de Acceso Biométrico | Inicio de Sesión")
+    login_win.geometry("500x680")
+    login_win.resizable(False, False)
+    login_win.configure(bg="#0B1120")
+
+    def on_login_success(usuario: Usuario):
+        usuario_autenticado["user"] = usuario
+        login_win.destroy()
+
+    def on_login_cancel():
+        login_win.destroy()
+
+    # Si la base de datos está recién instalada y sin usuarios
+    if not db.has_usuarios():
+        dlg_admin = PrimerInicioAdminDialog(login_win, db)
+        login_win.wait_window(dlg_admin)
+
+    # Si aún no hay usuarios tras cancelar el asistente inicial, salir
+    if not db.has_usuarios():
+        login_win.destroy()
+        return
+
+    # Instanciar el diálogo de login anidado en login_win o usar su frame
+    dlg = LoginDialog(
+        parent=login_win,
+        db=db,
+        on_success=on_login_success,
+        on_cancel=on_login_cancel
+    )
+    login_win.withdraw()  # Ocultamos el root vacío de login ya que LoginDialog (Toplevel) es el UI
+
+    # Manejar cierre de la ventana
+    def _al_cerrar_login():
+        if login_win.winfo_exists():
+            login_win.destroy()
+
+    dlg.protocol("WM_DELETE_WINDOW", _al_cerrar_login)
+    login_win.mainloop()
+
+    # 2. Si el usuario se autenticó exitosamente, abrir la interfaz principal del sistema
+    if usuario_autenticado["user"] is not None:
+        root = tk.Tk()
+        app = GuardApp(root, current_user=usuario_autenticado["user"])
+        root.mainloop()
 
 
 if __name__ == "__main__":
