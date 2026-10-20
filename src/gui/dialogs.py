@@ -95,17 +95,27 @@ class LoginDialog(tk.Toplevel):
 
     def _center_window(self, parent):
         self.update_idletasks()
-        try:
-            pw = parent.winfo_width()
-            ph = parent.winfo_height()
-            px = parent.winfo_x()
-            py = parent.winfo_y()
-        except Exception:
-            pw, ph, px, py = 1200, 800, 100, 100
-
         w, h = 500, 680
-        x = px + max(0, (pw - w) // 2)
-        y = py + max(0, (ph - h) // 2)
+        try:
+            # Si el padre está mapeado y visible
+            if parent.winfo_ismapped():
+                pw = parent.winfo_width()
+                ph = parent.winfo_height()
+                px = parent.winfo_x()
+                py = parent.winfo_y()
+                x = px + max(0, (pw - w) // 2)
+                y = py + max(0, (ph - h) // 2)
+            else:
+                sw = self.winfo_screenwidth()
+                sh = self.winfo_screenheight()
+                x = max(0, (sw - w) // 2)
+                y = max(0, (sh - h) // 2)
+        except Exception:
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
@@ -266,7 +276,11 @@ class LoginDialog(tk.Toplevel):
     def _on_window_close(self):
         if not self.user_authenticated and self.on_cancel:
             self.on_cancel()
-        self.destroy()
+        try:
+            if self.winfo_exists():
+                self.destroy()
+        except tk.TclError:
+            pass  # la app principal ya fue destruida por on_cancel
 
 
 class ConfirmAdminDialog(tk.Toplevel):
@@ -642,6 +656,121 @@ class CrearUsuarioDialog(tk.Toplevel):
         self.datos = {"nombre": nom, "username": usr, "password": pwd, "rol": rol}
         self.confirmado = True
         self.destroy()
+
+
+class CambiarPasswordDialog(tk.Toplevel):
+    """
+    Diálogo modal para el cambio seguro de contraseñas de usuarios (Aleida).
+    Valida la contraseña actual, comprueba longitud mínima y confirma la nueva clave.
+    """
+
+    def __init__(self, parent, db: Database, username_actual: str):
+        super().__init__(parent)
+        self.db = db
+        self.username_actual = username_actual
+        self.exito = False
+
+        self.title("ITSX - Actualización Segura de Contraseña")
+        self.geometry("450x420")
+        self.resizable(False, False)
+
+        self.COLOR_BG = "#0B1120"
+        self.COLOR_PANEL = "#151F32"
+        self.COLOR_CARD = "#1E293B"
+        self.COLOR_GOLD_ITSX = "#E5A823"
+        self.COLOR_GREEN = "#10B981"
+        self.COLOR_RED = "#EF4444"
+
+        self.configure(bg=self.COLOR_BG)
+        self.transient(parent)
+        self.grab_set()
+
+        self._build_ui()
+        self._center_window(parent)
+
+    def _center_window(self, parent):
+        self.update_idletasks()
+        w, h = 450, 420
+        try:
+            pw, ph, px, py = parent.winfo_width(), parent.winfo_height(), parent.winfo_x(), parent.winfo_y()
+        except Exception:
+            pw, ph, px, py = 1200, 800, 100, 100
+        x = px + max(0, (pw - w) // 2)
+        y = py + max(0, (ph - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _build_ui(self):
+        main = tk.Frame(self, bg=self.COLOR_BG, padx=24, pady=18)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(
+            main, text="🔐  CAMBIO SEGURO DE CONTRASEÑA",
+            font=("Helvetica", 11, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_BG
+        ).pack(anchor=tk.W, pady=(0, 6))
+
+        tk.Label(
+            main, text=f"Usuario activo: {self.username_actual}",
+            font=("Helvetica", 9), fg="#94A3B8", bg=self.COLOR_BG
+        ).pack(anchor=tk.W, pady=(0, 12))
+
+        card = tk.Frame(main, bg=self.COLOR_PANEL, bd=1, relief=tk.SOLID, padx=16, pady=14)
+        card.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+
+        tk.Label(card, text="Contraseña Actual:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_pass_act = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT, show="•")
+        self.ent_pass_act.pack(fill=tk.X, pady=(2, 8))
+
+        tk.Label(card, text="Nueva Contraseña (mínimo 6 caracteres):", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_pass_new = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT, show="•")
+        self.ent_pass_new.pack(fill=tk.X, pady=(2, 8))
+
+        tk.Label(card, text="Confirmar Nueva Contraseña:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        self.ent_pass_conf = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT, show="•")
+        self.ent_pass_conf.pack(fill=tk.X, pady=(2, 4))
+
+        btn_box = tk.Frame(main, bg=self.COLOR_BG)
+        btn_box.pack(fill=tk.X)
+
+        tk.Button(
+            btn_box, text="Cancelar", font=("Helvetica", 10), bg="#475569", fg="#ffffff",
+            relief=tk.FLAT, padx=14, pady=6, cursor="hand2", command=self.destroy
+        ).pack(side=tk.LEFT)
+
+        tk.Button(
+            btn_box, text="Actualizar Contraseña 🔒", font=("Helvetica", 10, "bold"),
+            bg=self.COLOR_GREEN, fg="#ffffff", relief=tk.FLAT, padx=16, pady=6,
+            cursor="hand2", command=self._on_guardar
+        ).pack(side=tk.RIGHT)
+
+        self.ent_pass_act.focus_set()
+
+    def _on_guardar(self):
+        p_act = self.ent_pass_act.get()
+        p_new = self.ent_pass_new.get()
+        p_conf = self.ent_pass_conf.get()
+
+        if not p_act or not p_new or not p_conf:
+            messagebox.showerror("Campos Obligatorios", "Por favor llene todos los campos de contraseña.", parent=self)
+            return
+
+        if p_new != p_conf:
+            messagebox.showerror("No Coinciden", "La nueva contraseña y su confirmación no coinciden.", parent=self)
+            return
+
+        ok, msg = self.db.cambiar_password_usuario(
+            username=self.username_actual,
+            password_actual=p_act,
+            password_nueva=p_new
+        )
+
+        if ok:
+            messagebox.showinfo("Éxito", msg, parent=self)
+            self.exito = True
+            self.destroy()
+        else:
+            messagebox.showerror("Error al Actualizar", msg, parent=self)
+            self.ent_pass_act.delete(0, tk.END)
+            self.ent_pass_act.focus_set()
 
 
 class AvisoPrivacidadDialog(tk.Toplevel):

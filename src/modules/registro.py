@@ -239,8 +239,10 @@ def registrar_estudiante_en_vivo(
 
     while True:
         matricula = input("Matrícula del estudiante: ").strip()
-        if not matricula:
-            print("[-] La matrícula no puede estar vacía.")
+        from src.utils.validators import validar_matricula_itsx
+        es_val, msg_val = validar_matricula_itsx(matricula)
+        if not es_val:
+            print(f"[-] ERROR DE SINTAXIS: {msg_val}")
             continue
         # Comprobar que la matrícula no choque con otro alumno
         alumno_mat = db.get_estudiante_by_matricula(matricula)

@@ -175,7 +175,7 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
                         if not (visual_state.es_activo() and visual_state.estado == "PERMITIDO"):
                             visual_state.actualizar(
                                 estado="DENEGADO",
-                                nombre="Desconocido",
+                                nombre="No Registrado",
                                 matricula=None,
                                 distancia=match_result.distancia,
                                 confianza=match_result.confianza_pct

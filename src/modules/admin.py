@@ -209,6 +209,40 @@ def exportar_accesos_excel(filename: Optional[str] = None, logs_data: Optional[L
     return filename
 
 
+def generar_reporte_diario_excel(fecha: Optional[str] = None, output_dir: Optional[str] = None) -> str:
+    """
+    Automatización de reporte diario en Excel (Guadalupe Velázquez):
+    Genera un archivo Excel oficial con formato institucional y nombre estandarizado:
+    itsx_accesos_YYYY-MM-DD.xlsx conteniendo los accesos correspondientes a dicha fecha.
+    """
+    import os
+    if not fecha:
+        fecha_str = datetime.now().strftime("%Y-%m-%d")
+    else:
+        fecha_str = fecha.strip()
+
+    if not output_dir:
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        archivos_dir = os.path.join(base_dir, "Archivos exel")
+        if not os.path.exists(archivos_dir):
+            try:
+                os.makedirs(archivos_dir, exist_ok=True)
+            except Exception:
+                archivos_dir = base_dir
+        output_dir = archivos_dir
+
+    filename = os.path.join(output_dir, f"itsx_accesos_{fecha_str}.xlsx")
+
+    db = Database()
+    db.init_db()
+    todos_logs = db.get_recent_accesos(limit=10000)
+    # Filtrar solo los registros que corresponden al día especificado (YYYY-MM-DD)
+    logs_dia = [log for log in todos_logs if str(log.timestamp or "").startswith(fecha_str)]
+
+    exportar_accesos_excel(filename=filename, logs_data=logs_dia)
+    return filename
+
+
 
 def eliminar_estudiante():
     """Elimina el registro y template de un estudiante."""

@@ -42,10 +42,11 @@ from src.gui.dialogs import (
     ConfirmAdminDialog,
     EditEstudianteDialog,
     CrearUsuarioDialog,
+    CambiarPasswordDialog,
     AvisoPrivacidadDialog,
     PrimerInicioAdminDialog
 )
-from src.modules.admin import exportar_accesos_excel
+from src.modules.admin import exportar_accesos_excel, generar_reporte_diario_excel
 
 try:
     import mediapipe as mp
@@ -94,6 +95,8 @@ class GuardApp:
         self.COLOR_ACCENT = "#38BDF8"      # Cyan tecnológico
 
         self.root.configure(bg=self.COLOR_BG)
+        # Ocultar la ventana principal hasta que el usuario se autentique
+        self.root.withdraw()
 
         # Base de datos y autenticación
         self.db = Database()
@@ -308,6 +311,21 @@ class GuardApp:
         )
         self.lbl_clock.pack(side=tk.LEFT, padx=(0, 12))
 
+        self.btn_cambiar_pass = tk.Button(
+            top_right_row,
+            text="🔑 Cambiar Clave",
+            font=("Helvetica", 9, "bold"),
+            bg="#1E293B",
+            fg=self.COLOR_GOLD_ITSX,
+            activebackground="#334155",
+            relief=tk.FLAT,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self._abrir_cambiar_password
+        )
+        self.btn_cambiar_pass.pack(side=tk.LEFT, padx=(0, 6))
+
         self.btn_logout = tk.Button(
             top_right_row,
             text="🚪 Cerrar Sesión",
@@ -369,6 +387,11 @@ class GuardApp:
         self.current_user = usuario
         self._aplicar_permisos_usuario()
 
+        # Mostrar la ventana principal del sistema ahora que el usuario se autenticó
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
         # Iniciar cámara solo una vez después del login
         if not self._camera_started:
             self._iniciar_camara()
@@ -396,6 +419,8 @@ class GuardApp:
                 self.notebook.select(self.tab_acceso)
             except Exception:
                 pass
+            # Ocultar la ventana del sistema mientras se vuelve a iniciar sesión
+            self.root.withdraw()
             self._mostrar_login()
 
     def _aplicar_permisos_usuario(self):
@@ -949,7 +974,19 @@ class GuardApp:
             bg="#475569", fg="#ffffff", activebackground="#64748B", activeforeground="#ffffff",
             relief=tk.FLAT, padx=6, pady=2, cursor="hand2", command=self._limpiar_filtros_accesos
         )
-        btn_limpiar.pack(side=tk.LEFT)
+        btn_limpiar.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_reporte_diario = tk.Button(
+            row2, text="📅 Reporte Diario", font=("Helvetica", 8, "bold"),
+            bg=self.COLOR_GREEN, fg="#ffffff", activebackground="#059669", activeforeground="#ffffff",
+            relief=tk.FLAT, padx=6, pady=2, cursor="hand2", command=self._generar_reporte_diario_automatico
+        )
+        btn_reporte_diario.pack(side=tk.LEFT)
+
+        self.lbl_aviso_filtro_accesos = tk.Label(
+            filter_box, text="", font=("Helvetica", 8, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL
+        )
+        self.lbl_aviso_filtro_accesos.pack(anchor=tk.W, pady=(2, 0))
 
         cols_acc = ("id", "fecha", "matricula", "nombre", "dist", "estado")
         self.tree_accesos = ttk.Treeview(f_left, columns=cols_acc, show="headings", height=16)
@@ -1002,6 +1039,10 @@ class GuardApp:
         self.ent_buscar_estudiante = tk.Entry(filter_bar_est, font=("Helvetica", 9), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=3, relief=tk.FLAT)
         self.ent_buscar_estudiante.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         self.ent_buscar_estudiante.bind("<KeyRelease>", lambda e: self._filtrar_estudiantes())
+        self.lbl_aviso_filtro_estudiantes = tk.Label(
+            f_right, text="", font=("Helvetica", 8, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL
+        )
+        self.lbl_aviso_filtro_estudiantes.pack(anchor=tk.W, pady=(0, 4))
 
         cols_est = ("id", "matricula", "nombre", "carrera", "tam")
         self.tree_estudiantes = ttk.Treeview(f_right, columns=cols_est, show="headings", height=16)
@@ -1249,7 +1290,7 @@ class GuardApp:
                         self.lbl_count_auth.config(text=str(self.conteo_autorizados))
                 else:
                     self._cache_acceso.append({
-                        "box": box, "nombre": "Desconocido", "matricula": None,
+                        "box": box, "nombre": "No Registrado", "matricula": None,
                         "distancia": match.distancia, "confianza": match.confianza_pct, "auth": False
                     })
                     if not alguien_reconocido and (ahora - self.access_card_state["timer"] > config.VISUAL_STATUS_PERSISTENCE_SECONDS):
@@ -1470,6 +1511,23 @@ class GuardApp:
             messagebox.showwarning(
                 "Número de Control Requerido",
                 "Por favor ingrese el número de control del alumno, docente o personal."
+            )
+            self.ent_matricula.focus_set()
+            return
+
+        # Validación sintáctica institucional previa (Darian)
+        from src.utils.validators import validar_matricula_itsx
+        es_valida, msg_error = validar_matricula_itsx(clave)
+        if not es_valida:
+            self.lbl_escolar_status.config(
+                text=f"⚠️ {msg_error}",
+                fg="#FCA5A5",
+                bg="#450A0A"
+            )
+            messagebox.showwarning(
+                "Sintaxis de Matrícula Inválida",
+                f"⚠️ Error de sintaxis en el número de control:\n\n{msg_error}\n\n"
+                "Por favor corrija la entrada antes de continuar."
             )
             self.ent_matricula.focus_set()
             return
@@ -2174,6 +2232,28 @@ class GuardApp:
         else:
             messagebox.showerror("Error al Crear Usuario", msg)
 
+    def _abrir_cambiar_password(self):
+        """Abre el diálogo para que el usuario actual cambie su contraseña (Aleida)."""
+        if not self.current_user:
+            messagebox.showinfo("Sesión Requerida", "Debe iniciar sesión para cambiar su contraseña.")
+            return
+
+        dlg = CambiarPasswordDialog(self.root, self.db, self.current_user.username)
+        dlg.wait_window()
+        if getattr(dlg, "exito", False):
+            self._cargar_auditoria()
+
+    def _generar_reporte_diario_automatico(self):
+        """Genera el reporte diario oficial en Excel con nombre normalizado (Guadalupe Velázquez)."""
+        try:
+            ruta_rep = generar_reporte_diario_excel()
+            messagebox.showinfo(
+                "Reporte Diario Generado",
+                f"✓ Reporte diario oficial en Excel generado exitosamente:\n\n{ruta_rep}"
+            )
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo generar el reporte diario: {e}")
+
     # -------------------------------------------------------------------------
     def _cargar_tablas_bitacora(self):
         """Carga los registros y aplica los filtros activos."""
@@ -2183,11 +2263,17 @@ class GuardApp:
         self._filtrar_estudiantes()
 
     def _filtrar_accesos(self):
-        """Filtra la tabla de accesos por estado, rango de fechas, rango de horas y texto en tiempo real (PB-07)."""
+        """
+        Filtra la tabla de accesos por estado, rango de fechas, rango de horas y texto en tiempo real (PB-07).
+        Incorpora validaciones estrictas (Samantha) y retroalimentación explícita (Aleida).
+        """
         if not hasattr(self, "tree_accesos"):
             return
         for row in self.tree_accesos.get_children():
             self.tree_accesos.delete(row)
+
+        if hasattr(self, "lbl_aviso_filtro_accesos"):
+            self.lbl_aviso_filtro_accesos.config(text="", fg=self.COLOR_GOLD_ITSX)
 
         filtro_estado = getattr(self, "cmb_filtro_estado", None)
         estado_sel = filtro_estado.get() if filtro_estado else "Todos"
@@ -2206,6 +2292,64 @@ class GuardApp:
 
         filtro_txt = getattr(self, "ent_buscar_acceso", None)
         txt_query = filtro_txt.get().strip().lower() if filtro_txt else ""
+
+        # --- VALIDACIONES DE FECHA (Samantha: Bloquear rangos invertidos o formatos inválidos) ---
+        import re
+        patron_fecha = r"^\d{4}-\d{2}-\d{2}$"
+        if f_ini and not re.match(patron_fecha, f_ini):
+            if hasattr(self, "lbl_aviso_filtro_accesos"):
+                self.lbl_aviso_filtro_accesos.config(
+                    text="⚠️ Formato de Fecha Inicial incorrecto (use AAAA-MM-DD, ej. 2026-10-15)",
+                    fg=self.COLOR_RED
+                )
+            return
+
+        if f_fin and not re.match(patron_fecha, f_fin):
+            if hasattr(self, "lbl_aviso_filtro_accesos"):
+                self.lbl_aviso_filtro_accesos.config(
+                    text="⚠️ Formato de Fecha Final incorrecto (use AAAA-MM-DD, ej. 2026-10-20)",
+                    fg=self.COLOR_RED
+                )
+            return
+
+        if f_ini and f_fin and f_ini > f_fin:
+            if hasattr(self, "lbl_aviso_filtro_accesos"):
+                self.lbl_aviso_filtro_accesos.config(
+                    text="⚠️ Rango invertido: La Fecha Inicial no puede ser posterior a la Fecha Final.",
+                    fg=self.COLOR_RED
+                )
+            return
+
+        # --- VALIDACIONES DE HORA (Samantha) ---
+        patron_hora = r"^\d{2}:\d{2}$"
+        if h_ini and not re.match(patron_hora, h_ini):
+            if hasattr(self, "lbl_aviso_filtro_accesos"):
+                self.lbl_aviso_filtro_accesos.config(
+                    text="⚠️ Formato de Hora Inicial incorrecto (use HH:MM, ej. 08:30)",
+                    fg=self.COLOR_RED
+                )
+            return
+
+        if h_fin and not re.match(patron_hora, h_fin):
+            if hasattr(self, "lbl_aviso_filtro_accesos"):
+                self.lbl_aviso_filtro_accesos.config(
+                    text="⚠️ Formato de Hora Final incorrecto (use HH:MM, ej. 18:00)",
+                    fg=self.COLOR_RED
+                )
+            return
+
+        # Si las fechas son idénticas o no se especificaron, validar que hora_ini <= hora_fin
+        if (not f_ini and not f_fin) or (f_ini == f_fin):
+            if h_ini and h_fin and h_ini > h_fin:
+                if hasattr(self, "lbl_aviso_filtro_accesos"):
+                    self.lbl_aviso_filtro_accesos.config(
+                        text="⚠️ Rango de horas invertido: La Hora Inicial no puede ser posterior a la Hora Final.",
+                        fg=self.COLOR_RED
+                    )
+                return
+
+        # Tokens para búsqueda flexible de nombres (empezando por nombre o por apellido)
+        tokens_query = [t for t in txt_query.split() if t]
 
         self._accesos_filtrados_actuales = []
 
@@ -2230,8 +2374,12 @@ class GuardApp:
 
             mat = (log.matricula or "").lower()
             nom = (log.nombre or "").lower()
-            if txt_query and (txt_query not in mat and txt_query not in nom):
-                continue
+
+            # Validación de búsqueda: todos los tokens ingresados deben encontrarse en la matrícula o en el nombre
+            if tokens_query:
+                texto_completo = f"{mat} {nom}"
+                if not all(tok in texto_completo for tok in tokens_query):
+                    continue
 
             self._accesos_filtrados_actuales.append(log)
 
@@ -2242,7 +2390,7 @@ class GuardApp:
                     log.id,
                     log.timestamp,
                     log.matricula or "---",
-                    log.nombre or "Desconocido",
+                    log.nombre or "No Registrado",
                     f"{log.distancia:.3f}",
                     "✓ AUTORIZADO" if log.estado == "PERMITIDO" else "✗ DENEGADO"
                 ),
@@ -2251,6 +2399,20 @@ class GuardApp:
 
         self.tree_accesos.tag_configure("auth", foreground=self.COLOR_GREEN)
         self.tree_accesos.tag_configure("den", foreground=self.COLOR_RED)
+
+        # Mensaje de retroalimentación explícita (Aleida: no dejar la interfaz en silencio)
+        if hasattr(self, "lbl_aviso_filtro_accesos"):
+            total_filtrados = len(self._accesos_filtrados_actuales)
+            if total_filtrados == 0:
+                self.lbl_aviso_filtro_accesos.config(
+                    text="ℹ️ No se encontraron registros de accesos con los criterios ingresados.",
+                    fg=self.COLOR_GOLD_ITSX
+                )
+            else:
+                self.lbl_aviso_filtro_accesos.config(
+                    text=f"✓ Se muestran {total_filtrados} registro(s) coincidentes.",
+                    fg="#38BDF8"
+                )
 
     def _limpiar_filtros_accesos(self):
         """Restablece los filtros de búsqueda de accesos a sus valores por defecto."""
@@ -2266,10 +2428,16 @@ class GuardApp:
             self.ent_filtro_hora_fin.delete(0, tk.END)
         if hasattr(self, "ent_buscar_acceso"):
             self.ent_buscar_acceso.delete(0, tk.END)
+        if hasattr(self, "lbl_aviso_filtro_accesos"):
+            self.lbl_aviso_filtro_accesos.config(text="")
         self._filtrar_accesos()
 
     def _filtrar_estudiantes(self):
-        """Filtra la tabla del padrón de alumnos por texto en tiempo real."""
+        """
+        Filtra la tabla del padrón de alumnos por texto en tiempo real.
+        Permite búsqueda tolerante por apellidos o nombres indiferente al orden (Samantha)
+        y emite alertas cuando no se encuentre a la persona (Aleida).
+        """
         if not hasattr(self, "tree_estudiantes"):
             return
         for row in self.tree_estudiantes.get_children():
@@ -2277,18 +2445,37 @@ class GuardApp:
 
         filtro_txt = getattr(self, "ent_buscar_estudiante", None)
         txt_query = filtro_txt.get().strip().lower() if filtro_txt else ""
+        tokens_query = [t for t in txt_query.split() if t]
 
+        encontrados = 0
         for al in getattr(self, "_cache_raw_estudiantes", []):
             mat = (al.matricula or "").lower()
             nom = (al.nombre or "").lower()
             car = (al.carrera or "").lower()
-            if txt_query and (txt_query not in mat and txt_query not in nom and txt_query not in car):
+            texto_registro = f"{mat} {nom} {car}"
+
+            if tokens_query and not all(tok in texto_registro for tok in tokens_query):
                 continue
 
+            encontrados += 1
             self.tree_estudiantes.insert(
                 "", tk.END,
                 values=(al.id, al.matricula, al.nombre, al.carrera or "N/A", "1024 bytes (cifrado)")
             )
+
+        if hasattr(self, "lbl_aviso_filtro_estudiantes"):
+            if txt_query and encontrados == 0:
+                self.lbl_aviso_filtro_estudiantes.config(
+                    text=f"❌ No se encontró ningún estudiante con '{txt_query}'.",
+                    fg=self.COLOR_RED
+                )
+            elif txt_query:
+                self.lbl_aviso_filtro_estudiantes.config(
+                    text=f"✓ {encontrados} estudiante(s) coincidente(s).",
+                    fg="#38BDF8"
+                )
+            else:
+                self.lbl_aviso_filtro_estudiantes.config(text="")
 
     def _recargar_alumnos(self):
         self.estudiantes = self.db.get_all_active_estudiantes()
@@ -2429,6 +2616,11 @@ class GuardApp:
         self.is_camera_running = False
         if self.cap is not None:
             self.cap.release()
+        try:
+            # Mantenimiento preventivo al cerrar: purga y rotación automática (Guadalupe Velázquez)
+            self.db.rotar_registros_antiguos(dias_retencion=30, max_registros=5000)
+        except Exception:
+            pass
         self.root.destroy()
 
 

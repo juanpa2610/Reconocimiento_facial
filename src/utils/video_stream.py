@@ -34,8 +34,9 @@ import numpy as np
 
 import config
 
-# Cuántas lecturas fallidas consecutivas fuerzan reconexión inmediata (sin esperar timeout).
-_FAIL_THRESHOLD = 8
+# Con RTSP es normal que algunas lecturas fallen (paquetes H.264 corruptos por Wi-Fi).
+# Solo se considera "sin señal" tras este tiempo sin ningún cuadro válido.
+_NO_SIGNAL_SECONDS = 2.0
 
 
 class ThreadedCamera:
@@ -113,7 +114,14 @@ class ThreadedCamera:
 
         # Fuente de red (RTSP, HTTP, etc.)
         if isinstance(self.source, str):
-            cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
+            try:
+                cap = cv2.VideoCapture(
+                    self.source, cv2.CAP_FFMPEG,
+                    [cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 8000,
+                     cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000],
+                )
+            except Exception:
+                cap = cv2.VideoCapture(self.source, cv2.CAP_FFMPEG)
         else:
             cap = cv2.VideoCapture(self.source)
 
@@ -183,15 +191,11 @@ class ThreadedCamera:
             consecutive_fails += 1
             elapsed_since_ok = time.time() - last_ok
 
-            # Señal perdida: actualizar flag para que la GUI lo muestre
-            if not self.no_signal:
+            # Señal perdida solo si llevamos un rato sin cuadros (no al primer error)
+            if not self.no_signal and elapsed_since_ok >= _NO_SIGNAL_SECONDS:
                 self.no_signal = True
 
-            # Reconexión inmediata si hay muchos fallos seguidos o superamos el timeout
-            should_reconnect = (
-                consecutive_fails >= _FAIL_THRESHOLD
-                or elapsed_since_ok >= self.reconnect_seconds
-            )
+            should_reconnect = elapsed_since_ok >= self.reconnect_seconds
 
             if should_reconnect:
                 print(
@@ -207,16 +211,23 @@ class ThreadedCamera:
                 self._cap = self._open_capture()
                 last_ok = time.time()
                 if self._cap is not None:
-                    self.no_signal = False
                     print("[✓] Cámara reconectada.")
                 else:
                     # Esperar antes del próximo intento para no saturar CPU
                     time.sleep(min(self.reconnect_seconds, 2.0))
             else:
-                time.sleep(0.05)
+                time.sleep(0.01)
 
         self._running = False
         self.no_signal = True
+        # El propio hilo lector libera el VideoCapture: liberarlo desde otro hilo
+        # mientras cap.read() está activo provoca 'Violación de segmento'.
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
         with self._cond:
             self._cond.notify_all()
 
@@ -248,7 +259,11 @@ class ThreadedCamera:
     def release(self):
         self._running = False
         if self._thread is not None:
-            self._thread.join(timeout=3.0)
+            self._thread.join(timeout=6.0)
+            if self._thread.is_alive():
+                # Sigue bloqueado en cap.read(); él mismo liberará la cámara al salir.
+                self._thread = None
+                return
             self._thread = None
         if self._cap is not None:
             try:

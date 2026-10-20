@@ -7,28 +7,27 @@ modularidad, portabilidad y reproducibilidad en la investigación.
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Cargar variables de entorno desde .env si existe antes de configurar opciones de FFmpeg
+BASE_DIR = Path(__file__).resolve().parent
+ENV_PATH = BASE_DIR / ".env"
+if ENV_PATH.exists():
+    load_dotenv(ENV_PATH, override=True)
+
 # Configurar directorio temporal de caché para matplotlib y mediapipe
 os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_cache")
 
 # Opciones de FFmpeg para streams RTSP (cámaras IP como la Tapo C310) con la menor latencia posible.
 # IMPORTANTE: deben estar definidas ANTES de la primera llamada a cv2.VideoCapture.
-#   - rtsp_transport;tcp  -> evita pérdida de paquetes por Wi-Fi (menos artefactos / saltos)
+#   - rtsp_transport;udp  -> sin bloqueos de retransmisión por micro-cortes Wi-Fi
 #   - fflags;nobuffer     -> FFmpeg no acumula cuadros en su búfer interno de entrada
 #   - flags;low_delay     -> decodificación de baja latencia
-# Si en tu red prefieres UDP, pon RTSP_TRANSPORT=udp en el .env
-_RTSP_TRANSPORT = os.getenv("RTSP_TRANSPORT", "tcp").lower()
-os.environ.setdefault(
-    "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-    f"rtsp_transport;{_RTSP_TRANSPORT}|fflags;nobuffer|flags;low_delay"
+_RTSP_TRANSPORT = os.getenv("RTSP_TRANSPORT", "udp").lower()
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    f"rtsp_transport;{_RTSP_TRANSPORT}|fflags;nobuffer|flags;low_delay|threads;4|max_delay;0"
 )
 
-from dotenv import load_dotenv
-
-# Cargar variables de entorno desde .env si existe
-BASE_DIR = Path(__file__).resolve().parent
-ENV_PATH = BASE_DIR / ".env"
-if ENV_PATH.exists():
-    load_dotenv(ENV_PATH)
 
 # Configuración de Base de Datos
 DB_ENGINE = os.getenv("DB_ENGINE", "sqlite").lower()
@@ -47,8 +46,8 @@ VECTOR_DIMENSION = 128
 
 # Umbral de distancia euclidiana L2:
 # Distancia <= FACE_DISTANCE_THRESHOLD indica una coincidencia de identidad positiva.
-# Un valor de 0.50 a 0.55 es el estándar de alta seguridad para evitar falsos positivos.
-FACE_DISTANCE_THRESHOLD = float(os.getenv("FACE_DISTANCE_THRESHOLD", "0.55"))
+# Un valor de 0.50 es el estándar estricto de alta seguridad para evitar falsos positivos y falsas asociaciones.
+FACE_DISTANCE_THRESHOLD = float(os.getenv("FACE_DISTANCE_THRESHOLD", "0.50"))
 
 # Fuente de video: int si es cámara local (ej. 0), string si es URL RTSP / archivo
 _raw_source = os.getenv("VIDEO_SOURCE", "0")
@@ -72,7 +71,7 @@ ENABLE_FACE_MESH = os.getenv("ENABLE_FACE_MESH", "true").lower() in ("true", "1"
 # Ancho máximo (px) al que se reduce cada cuadro DENTRO del hilo lector de la cámara.
 # La Tapo C310 en 'stream1' envía ~2304x1296; procesarlo completo en CPU es inviable.
 # 0 = no redimensionar. Recomendado: 960.
-CAMERA_MAX_WIDTH = int(os.getenv("CAMERA_MAX_WIDTH", "960"))
+CAMERA_MAX_WIDTH = int(os.getenv("CAMERA_MAX_WIDTH", "1280"))
 
 # Ancho (px) de la imagen que se le entrega al detector HOG. Menor = más rápido,
 # pero detecta peor rostros lejanos. Recomendado: 400-640.
@@ -82,7 +81,8 @@ DETECTION_WIDTH = int(os.getenv("DETECTION_WIDTH", "480"))
 PROCESS_EVERY_N_FRAMES = max(1, int(os.getenv("PROCESS_EVERY_N_FRAMES", "3")))
 
 # Segundos sin recibir cuadros tras los cuales se reconecta automáticamente (cámaras IP/Wi-Fi).
-CAMERA_RECONNECT_SECONDS = float(os.getenv("CAMERA_RECONNECT_SECONDS", "3.0"))
+# Valores muy bajos (3 s) provocan reconexiones constantes por micro-cortes del Wi-Fi.
+CAMERA_RECONNECT_SECONDS = float(os.getenv("CAMERA_RECONNECT_SECONDS", "10.0"))
 
 # -----------------------------------------------------------------------------
 # Anti-suplantación / Liveness (Detección de parpadeo con Eye Aspect Ratio - EAR)

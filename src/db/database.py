@@ -672,6 +672,123 @@ class Database:
                     ))
         return usuarios
 
+    def cambiar_password_usuario(
+        self,
+        username: str,
+        password_actual: str,
+        password_nueva: str
+    ) -> Tuple[bool, str]:
+        """
+        Permite a un usuario actualizar su contraseña validando previamente la contraseña actual
+        y aplicando hash criptográfico PBKDF2-HMAC-SHA256 a la nueva contraseña.
+        """
+        u_clean = (username or "").strip()
+        p_act = (password_actual or "")
+        p_new = (password_nueva or "").strip()
+
+        if not u_clean or not p_act or not p_new:
+            return False, "Todos los campos de contraseña son obligatorios."
+
+        if len(p_new) < 6:
+            return False, "La nueva contraseña debe tener al menos 6 caracteres por seguridad."
+
+        # Validar contraseña actual
+        user = self.autenticar_usuario(u_clean, p_act)
+        if not user:
+            self.log_auditoria(u_clean, "CAMBIO_PASSWORD", "USUARIO", "Intento fallido de cambio de contraseña: credencial actual incorrecta", "FALLIDO_AUTENTICACION")
+            return False, "La contraseña actual es incorrecta."
+
+        nuevo_hash = hash_password(p_new)
+
+        try:
+            if self.engine == "postgres":
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("UPDATE usuarios SET password_hash = %s WHERE id = %s", (nuevo_hash, user.id))
+                        conn.commit()
+            else:
+                with self._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("UPDATE usuarios SET password_hash = ? WHERE id = ?", (nuevo_hash, user.id))
+                    conn.commit()
+
+            self.log_auditoria(user.username, "CAMBIO_PASSWORD", "USUARIO", f"Contraseña actualizada exitosamente para el usuario '{user.username}'", "EXITO")
+            return True, "Contraseña actualizada exitosamente."
+        except Exception as e:
+            err = f"Error al actualizar la contraseña: {e}"
+            self.log_auditoria(user.username, "CAMBIO_PASSWORD", "USUARIO", err, "ERROR")
+            return False, err
+
+    def rotar_registros_antiguos(
+        self,
+        dias_retencion: int = 30,
+        max_registros: int = 5000
+    ) -> Dict[str, int]:
+        """
+        Mantenimiento preventivo de bitácoras (Guadalupe Velázquez):
+        Elimina registros de auditoría y accesos que superen los días de retención o el tope máximo
+        de filas para prevenir saturación de memoria y espacio en disco.
+        Ejecuta VACUUM para compactar el archivo SQLite.
+        """
+        resumen = {"accesos_purgados": 0, "auditoria_purgada": 0}
+        try:
+            limite_fecha = datetime.now().timestamp() - (dias_retencion * 86400)
+            limite_str = datetime.fromtimestamp(limite_fecha).strftime("%Y-%m-%d %H:%M:%S")
+
+            if self.engine == "sqlite":
+                with self._get_sqlite_connection() as conn:
+                    cursor = conn.cursor()
+                    # 1. Purgar accesos por fecha antigua
+                    cursor.execute("DELETE FROM registro_accesos WHERE timestamp < ?", (limite_str,))
+                    resumen["accesos_purgados"] += cursor.rowcount
+
+                    # 2. Si supera max_registros, mantener solo los últimos max_registros
+                    cursor.execute("""
+                        DELETE FROM registro_accesos WHERE id NOT IN (
+                            SELECT id FROM registro_accesos ORDER BY id DESC LIMIT ?
+                        )
+                    """, (max_registros,))
+                    resumen["accesos_purgados"] += cursor.rowcount
+
+                    # 3. Purgar auditoría por fecha y tope
+                    cursor.execute("""
+                        DELETE FROM bitacora_auditoria WHERE id NOT IN (
+                            SELECT id FROM bitacora_auditoria ORDER BY id DESC LIMIT ?
+                        )
+                    """, (max_registros,))
+                    resumen["auditoria_purgada"] += cursor.rowcount
+                    conn.commit()
+
+                    # Compactar base de datos física para liberar espacio en disco
+                    try:
+                        cursor.execute("VACUUM;")
+                    except Exception:
+                        pass
+            elif self.engine == "postgres" and PSYCOPG2_AVAILABLE:
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute("DELETE FROM registro_accesos WHERE timestamp < %s", (limite_str,))
+                        resumen["accesos_purgados"] += cursor.rowcount
+                        cursor.execute("""
+                            DELETE FROM registro_accesos WHERE id NOT IN (
+                                SELECT id FROM registro_accesos ORDER BY id DESC LIMIT %s
+                            )
+                        """, (max_registros,))
+                        resumen["accesos_purgados"] += cursor.rowcount
+                        cursor.execute("""
+                            DELETE FROM bitacora_auditoria WHERE id NOT IN (
+                                SELECT id FROM bitacora_auditoria ORDER BY id DESC LIMIT %s
+                            )
+                        """, (max_registros,))
+                        resumen["auditoria_purgada"] += cursor.rowcount
+                        conn.commit()
+
+            if resumen["accesos_purgados"] > 0 or resumen["auditoria_purgada"] > 0:
+                print(f"[*] Rotación de registros completada: {resumen['accesos_purgados']} accesos y {resumen['auditoria_purgada']} eventos de auditoría purgados.")
+        except Exception as e:
+            print(f"[!] Error durante la rotación de registros: {e}")
+        return resumen
+
     # -------------------------------------------------------------------------
     # GESTIÓN Y PERSISTENCIA DE CÁMARAS
     # -------------------------------------------------------------------------
