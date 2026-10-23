@@ -245,6 +245,15 @@ class TestBiometricSystem(unittest.TestCase):
         self.assertTrue(is_live, "Debe confirmar que el sujeto está vivo tras completar el parpadeo")
         self.assertEqual(blinks, 1)
 
+        detector.reset()
+        for _ in range(8):
+            live, _, _ = detector.update(landmarks_abierto)
+        self.assertFalse(live, "Una secuencia sin parpadeo no debe validar vitalidad")
+        detector.update(landmarks_cerrado)
+        detector.update(landmarks_cerrado)
+        detector.reset()  # cambio de persona/rostro
+        self.assertFalse(detector.update(landmarks_abierto)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

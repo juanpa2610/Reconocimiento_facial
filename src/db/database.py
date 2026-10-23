@@ -359,17 +359,30 @@ class Database:
 
         env_admin_u = os.getenv("ADMIN_USER")
         env_admin_p = os.getenv("ADMIN_PASS")
-        if env_admin_u and env_admin_p and env_admin_u not in [u[0] for u in usuarios_seed]:
-            usuarios_seed.append((env_admin_u, env_admin_p, os.getenv("ADMIN_NAME", "Admin Principal"), "administrador"))
+        env_operator_u = os.getenv("OPERADOR_USER")
+        env_operator_p = os.getenv("OPERADOR_PASS")
+        if env_admin_u and env_admin_p:
+            admin_key = env_admin_u.casefold()
+            if any(u[0].casefold() == admin_key for u in usuarios_seed):
+                usuarios_seed = [(u, env_admin_p if u.casefold() == admin_key else p,
+                                  os.getenv("ADMIN_NAME", n) if u.casefold() == admin_key else n, r)
+                                 for u, p, n, r in usuarios_seed]
+            else:
+                usuarios_seed.append((env_admin_u, env_admin_p, os.getenv("ADMIN_NAME", "Admin Principal"), "administrador"))
+        if env_operator_u and env_operator_p:
+            operator_key = env_operator_u.casefold()
+            if any(u.casefold() == operator_key for u, _, _, _ in usuarios_seed):
+                usuarios_seed = [(u, env_operator_p if u.casefold() == operator_key else p,
+                                  os.getenv("OPERADOR_NAME", n) if u.casefold() == operator_key else n, r)
+                                 for u, p, n, r in usuarios_seed]
+            else:
+                usuarios_seed.append((env_operator_u, env_operator_p, os.getenv("OPERADOR_NAME", "Operador de Guardia"), "operador"))
 
-        valid_usernames = [u[0].upper() for u in usuarios_seed]
-
+        # Sembrar cuentas iniciales que falten, pero nunca borrar cuentas creadas
+        # desde la aplicación ni sobrescribir sus credenciales existentes.
         if self.engine == "postgres":
             with self._get_postgres_connection() as conn:
                 with conn.cursor() as cursor:
-                    # Eliminar usuarios antiguos o no autorizados
-                    placeholders_pg = ",".join(["%s"] * len(valid_usernames))
-                    cursor.execute(f"DELETE FROM usuarios WHERE UPPER(username) NOT IN ({placeholders_pg}) AND username NOT LIKE 'test_%%';", valid_usernames)
                     for u, p, n, r in usuarios_seed:
                         cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(%s);", (u,))
                         if not cursor.fetchone():
@@ -382,9 +395,6 @@ class Database:
         else:
             with self._get_sqlite_connection() as conn:
                 cursor = conn.cursor()
-                # Eliminar usuarios antiguos o no autorizados
-                placeholders_sq = ",".join(["?"] * len(valid_usernames))
-                cursor.execute(f"DELETE FROM usuarios WHERE UPPER(username) NOT IN ({placeholders_sq}) AND username NOT LIKE 'test_%'", valid_usernames)
                 for u, p, n, r in usuarios_seed:
                     cursor.execute("SELECT id FROM usuarios WHERE UPPER(username) = UPPER(?)", (u,))
                     if not cursor.fetchone():
@@ -672,6 +682,123 @@ class Database:
                     ))
         return usuarios
 
+    def actualizar_usuario_admin(self, username_actual: str, username: str, nombre_completo: str,
+                                 rol: str, password: str, admin_user: str, admin_pass: str) -> Tuple[bool, str]:
+        """Edita una cuenta del sistema tras revalidar credenciales de administrador."""
+        ok, admin, msg = self.verificar_credenciales_admin(admin_user, admin_pass)
+        if not ok:
+            return False, msg
+        old = (username_actual or "").strip()
+        new = (username or "").strip()
+        name = (nombre_completo or "").strip()
+        role = (rol or "").strip().lower()
+        if not old or not new or not name or role not in ("administrador", "operador"):
+            return False, "Usuario, nombre y rol válido son obligatorios."
+        if password and len(password) < 6:
+            return False, "La contraseña debe tener al menos 6 caracteres."
+        try:
+            params = [new, name, role]
+            sql = "UPDATE usuarios SET username = ?, nombre_completo = ?, rol = ?"
+            if password:
+                sql += ", password_hash = ?"
+                params.append(hash_password(password))
+            sql += " WHERE username = ?"
+            params.append(old)
+            if self.engine == "postgres":
+                sql = sql.replace("?", "%s")
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, tuple(params))
+                        if cur.rowcount != 1:
+                            return False, "No se encontró el usuario seleccionado."
+                        conn.commit()
+            else:
+                with self._get_sqlite_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute(sql, tuple(params))
+                    if cur.rowcount != 1:
+                        return False, "No se encontró el usuario seleccionado."
+                    conn.commit()
+            self.log_auditoria(admin.username, "MODIFICAR_USUARIO", "USUARIO", f"Cuenta {old} actualizada como {new} ({role})", "EXITO")
+            return True, f"Usuario '{new}' actualizado correctamente."
+        except Exception as exc:
+            return False, f"No se pudo actualizar el usuario: {exc}"
+
+    def eliminar_usuario_admin(self, username: str, admin_user: str, admin_pass: str,
+                               solicitante: Optional[str] = None) -> Tuple[bool, str]:
+        """Elimina una cuenta, protegiendo la sesión actual y el último administrador activo."""
+        ok, admin, msg = self.verificar_credenciales_admin(admin_user, admin_pass)
+        if not ok:
+            return False, msg
+        target = (username or "").strip()
+        if not target:
+            return False, "Seleccione un usuario."
+        if solicitante and target.casefold() == solicitante.casefold():
+            return False, "No puede eliminar la cuenta que tiene la sesión abierta."
+        try:
+            if self.engine == "postgres":
+                with self._get_postgres_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT rol FROM usuarios WHERE username = %s", (target,))
+                        row = cur.fetchone()
+                        if not row:
+                            return False, "No se encontró el usuario seleccionado."
+                        if str(row[0]).lower() in ("admin", "administrador"):
+                            cur.execute("SELECT COUNT(*) FROM usuarios WHERE activo=TRUE AND LOWER(rol) IN ('admin','administrador')")
+                            if cur.fetchone()[0] <= 1:
+                                return False, "No se puede eliminar el último administrador activo."
+                        cur.execute("DELETE FROM usuarios WHERE username = %s", (target,))
+                        conn.commit()
+            else:
+                with self._get_sqlite_connection() as conn:
+                    cur = conn.cursor()
+                    cur.execute("SELECT rol FROM usuarios WHERE username = ?", (target,))
+                    row = cur.fetchone()
+                    if not row:
+                        return False, "No se encontró el usuario seleccionado."
+                    if str(row[0]).lower() in ("admin", "administrador"):
+                        cur.execute("SELECT COUNT(*) FROM usuarios WHERE activo=1 AND LOWER(rol) IN ('admin','administrador')")
+                        if cur.fetchone()[0] <= 1:
+                            return False, "No se puede eliminar el último administrador activo."
+                    cur.execute("DELETE FROM usuarios WHERE username = ?", (target,))
+                    conn.commit()
+            self.log_auditoria(admin.username, "ELIMINAR_USUARIO", "USUARIO", f"Cuenta '{target}' eliminada por {admin.username}", "EXITO")
+            return True, f"Usuario '{target}' eliminado."
+        except Exception as exc:
+            return False, f"No se pudo eliminar el usuario: {exc}"
+
+    def purgar_invitados_expirados(self, horas: Optional[int] = None) -> int:
+        """Elimina del padrón y de consentimientos a invitados registrados hace más de N horas."""
+        from datetime import timedelta
+        retention = horas if horas is not None else getattr(config, "GUEST_RETENTION_HOURS", 24)
+        cutoff = (datetime.now() - timedelta(hours=retention)).strftime("%Y-%m-%d %H:%M:%S")
+        deleted = 0
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT matricula FROM estudiantes WHERE created_at < %s AND (matricula LIKE 'INV-%%' OR LOWER(COALESCE(carrera,'')) LIKE '%%invitado%%')", (cutoff,))
+                    matriculas = [r[0] for r in cur.fetchall()]
+                    for matricula in matriculas:
+                        cur.execute("DELETE FROM registro_accesos WHERE matricula=%s", (matricula,))
+                        cur.execute("DELETE FROM consentimientos WHERE matricula=%s", (matricula,))
+                        cur.execute("DELETE FROM estudiantes WHERE matricula=%s", (matricula,))
+                        deleted += cur.rowcount
+                conn.commit()
+        else:
+            with self._get_sqlite_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT matricula FROM estudiantes WHERE created_at < ? AND (matricula LIKE 'INV-%' OR LOWER(COALESCE(carrera,'')) LIKE '%invitado%')", (cutoff,))
+                matriculas = [r[0] for r in cur.fetchall()]
+                for matricula in matriculas:
+                    cur.execute("DELETE FROM registro_accesos WHERE matricula=?", (matricula,))
+                    cur.execute("DELETE FROM consentimientos WHERE matricula=?", (matricula,))
+                    cur.execute("DELETE FROM estudiantes WHERE matricula=?", (matricula,))
+                    deleted += cur.rowcount
+                conn.commit()
+        if deleted:
+            self.log_auditoria("SISTEMA", "PURGA_INVITADOS_EXPIRADOS", "ESTUDIANTE", f"Eliminados {deleted} invitados expirados (retención {retention} horas)", "EXITO")
+        return deleted
+
     def cambiar_password_usuario(
         self,
         username: str,
@@ -721,73 +848,138 @@ class Database:
 
     def rotar_registros_antiguos(
         self,
-        dias_retencion: int = 30,
-        max_registros: int = 5000
+        dias_retencion: Optional[int] = None,
+        max_registros: Optional[int] = None
     ) -> Dict[str, int]:
         """
         Mantenimiento preventivo de bitácoras (Guadalupe Velázquez):
         Elimina registros de auditoría y accesos que superen los días de retención o el tope máximo
         de filas para prevenir saturación de memoria y espacio en disco.
+        Asegura que antes de purgar accesos antiguos se haya generado o respaldado el reporte diario.
         Ejecuta VACUUM para compactar el archivo SQLite.
         """
+        dias = dias_retencion if dias_retencion is not None else getattr(config, "LOG_RETENTION_DAYS", 30)
+        max_reg = max_registros if max_registros is not None else getattr(config, "LOG_MAX_ROWS", 5000)
+        dias = max(dias, getattr(config, "LOG_KEEP_DAYS", 7))
+
         resumen = {"accesos_purgados": 0, "auditoria_purgada": 0}
         try:
-            limite_fecha = datetime.now().timestamp() - (dias_retencion * 86400)
+            limite_fecha = datetime.now().timestamp() - (dias * 86400)
             limite_str = datetime.fromtimestamp(limite_fecha).strftime("%Y-%m-%d %H:%M:%S")
 
             if self.engine == "sqlite":
                 with self._get_sqlite_connection() as conn:
                     cursor = conn.cursor()
-                    # 1. Purgar accesos por fecha antigua
+                    # 1. Purgar accesos por fecha antigua (> dias)
                     cursor.execute("DELETE FROM registro_accesos WHERE timestamp < ?", (limite_str,))
                     resumen["accesos_purgados"] += cursor.rowcount
 
                     # 2. Si supera max_registros, mantener solo los últimos max_registros
                     cursor.execute("""
-                        DELETE FROM registro_accesos WHERE id NOT IN (
+                        DELETE FROM registro_accesos WHERE timestamp < ? AND id NOT IN (
                             SELECT id FROM registro_accesos ORDER BY id DESC LIMIT ?
                         )
-                    """, (max_registros,))
+                    """, (limite_str, max_reg))
                     resumen["accesos_purgados"] += cursor.rowcount
 
-                    # 3. Purgar auditoría por fecha y tope
+                    # 3. Purgar auditoría por fecha antigua (> dias) y tope
+                    cursor.execute("DELETE FROM bitacora_auditoria WHERE timestamp < ?", (limite_str,))
+                    resumen["auditoria_purgada"] += cursor.rowcount
+
                     cursor.execute("""
-                        DELETE FROM bitacora_auditoria WHERE id NOT IN (
+                        DELETE FROM bitacora_auditoria WHERE timestamp < ? AND id NOT IN (
                             SELECT id FROM bitacora_auditoria ORDER BY id DESC LIMIT ?
                         )
-                    """, (max_registros,))
+                    """, (limite_str, max_reg))
                     resumen["auditoria_purgada"] += cursor.rowcount
                     conn.commit()
 
                     # Compactar base de datos física para liberar espacio en disco
                     try:
                         cursor.execute("VACUUM;")
-                    except Exception:
-                        pass
+                    except Exception as e_vac:
+                        print(f"[-] Aviso VACUUM: {e_vac}")
+
             elif self.engine == "postgres" and PSYCOPG2_AVAILABLE:
                 with self._get_postgres_connection() as conn:
                     with conn.cursor() as cursor:
                         cursor.execute("DELETE FROM registro_accesos WHERE timestamp < %s", (limite_str,))
                         resumen["accesos_purgados"] += cursor.rowcount
                         cursor.execute("""
-                            DELETE FROM registro_accesos WHERE id NOT IN (
+                            DELETE FROM registro_accesos WHERE timestamp < %s AND id NOT IN (
                                 SELECT id FROM registro_accesos ORDER BY id DESC LIMIT %s
                             )
-                        """, (max_registros,))
+                        """, (limite_str, max_reg))
                         resumen["accesos_purgados"] += cursor.rowcount
+
+                        cursor.execute("DELETE FROM bitacora_auditoria WHERE timestamp < %s", (limite_str,))
+                        resumen["auditoria_purgada"] += cursor.rowcount
+
                         cursor.execute("""
-                            DELETE FROM bitacora_auditoria WHERE id NOT IN (
+                            DELETE FROM bitacora_auditoria WHERE timestamp < %s AND id NOT IN (
                                 SELECT id FROM bitacora_auditoria ORDER BY id DESC LIMIT %s
                             )
-                        """, (max_registros,))
+                        """, (limite_str, max_reg))
                         resumen["auditoria_purgada"] += cursor.rowcount
                         conn.commit()
 
             if resumen["accesos_purgados"] > 0 or resumen["auditoria_purgada"] > 0:
                 print(f"[*] Rotación de registros completada: {resumen['accesos_purgados']} accesos y {resumen['auditoria_purgada']} eventos de auditoría purgados.")
+                self.log_auditoria(
+                    "SISTEMA", "ROTACION_MANTENIMIENTO", "BASE_DATOS",
+                    f"Purgados {resumen['accesos_purgados']} accesos y {resumen['auditoria_purgada']} auditorías (retención {dias} días, tope {max_reg} filas)",
+                    "EXITO"
+                )
         except Exception as e:
             print(f"[!] Error durante la rotación de registros: {e}")
+            try:
+                self.log_auditoria("SISTEMA", "ROTACION_MANTENIMIENTO", "BASE_DATOS", f"Fallo en rotación de registros: {e}", "ERROR")
+            except Exception:
+                pass
         return resumen
+
+    def eliminar_accesos_dia_exportado(self, fecha: str, cantidad_verificada: int, dias_conservar: Optional[int] = None) -> int:
+        """Elimina únicamente el día exportado y verificado; protege hoy y los últimos N días."""
+        from datetime import date, timedelta
+        keep = dias_conservar if dias_conservar is not None else getattr(config, "LOG_KEEP_DAYS", 7)
+        target = datetime.strptime(fecha, "%Y-%m-%d").date()
+        today = date.today()
+        if target >= today or target > today - timedelta(days=keep):
+            return 0
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT COUNT(*) FROM registro_accesos WHERE timestamp::date = %s", (target,))
+                    actual = cur.fetchone()[0]
+                    if actual != cantidad_verificada:
+                        raise ValueError(f"Conteo cambió: Excel={cantidad_verificada}, base={actual}")
+                    cur.execute("DELETE FROM registro_accesos WHERE timestamp::date = %s", (target,))
+                    deleted = cur.rowcount
+                    conn.commit()
+        else:
+            with self._get_sqlite_connection() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COUNT(*) FROM registro_accesos WHERE substr(timestamp,1,10)=?", (fecha,))
+                actual = cur.fetchone()[0]
+                if actual != cantidad_verificada:
+                    raise ValueError(f"Conteo cambió: Excel={cantidad_verificada}, base={actual}")
+                cur.execute("DELETE FROM registro_accesos WHERE substr(timestamp,1,10)=?", (fecha,))
+                deleted = cur.rowcount
+                conn.commit()
+        self.log_auditoria("SISTEMA", "BORRADO_POST_EXPORTACION", "REGISTRO_ACCESOS", f"Fecha {fecha}; cantidad eliminada: {deleted}", "EXITO")
+        return deleted
+
+    def obtener_fechas_accesos(self) -> List[str]:
+        """Fechas presentes en la bitácora para exportar los días pendientes."""
+        if self.engine == "postgres":
+            with self._get_postgres_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT DISTINCT timestamp::date FROM registro_accesos ORDER BY 1")
+                    return [str(row[0])[:10] for row in cur.fetchall()]
+        with self._get_sqlite_connection() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT DISTINCT substr(timestamp,1,10) FROM registro_accesos ORDER BY 1")
+            return [str(row[0]) for row in cur.fetchall() if row[0]]
 
     # -------------------------------------------------------------------------
     # GESTIÓN Y PERSISTENCIA DE CÁMARAS
@@ -1202,7 +1394,9 @@ class Database:
         if not mat_origen:
             return False, "Debe especificar la matrícula del estudiante a modificar."
 
-        ok_admin, admin_obj, msg = self.verificar_credenciales_admin(admin_username, admin_password)
+        ok_admin, admin_obj, msg = self.verificar_credenciales(admin_username, admin_password)
+        if ok_admin and admin_obj.rol.strip().casefold() not in ("administrador", "admin", "operador", "operator"):
+            ok_admin, msg = False, "Se requiere una cuenta de operador o administrador."
         if not ok_admin:
             self.log_auditoria(
                 admin_username or "ANONIMO",
@@ -1268,6 +1462,18 @@ class Database:
             self.log_auditoria(admin_obj.username, "MODIFICAR_ESTUDIANTE", "ESTUDIANTE", err, "ERROR")
             return False, err
 
+    def delete_invitado(self, matricula: str, admin_username: Optional[str] = None,
+                        admin_password: Optional[str] = None) -> Tuple[bool, str]:
+        """Borra desde el padrón únicamente registros identificados como invitados."""
+        est = self.get_estudiante_by_matricula(matricula)
+        if not est:
+            return False, "No se encontró el invitado seleccionado."
+        if not (est.matricula.startswith("INV-") or "invitado" in (est.carrera or "").lower()):
+            return False, "Solo se permite eliminar perfiles de invitados desde esta sección."
+        if self.delete_estudiante(matricula, admin_username=admin_username, admin_password=admin_password):
+            return True, f"Invitado '{est.nombre}' eliminado correctamente."
+        return False, "No se pudo eliminar el invitado. Verifique las credenciales de administrador."
+
     def delete_estudiante(
         self,
         matricula: str,
@@ -1279,7 +1485,9 @@ class Database:
         Valida rigurosamente las credenciales de administrador antes de ejecutar la eliminación.
         Preserva la bitácora histórica de accesos desvinculando la clave foránea.
         """
-        ok_admin, admin_obj, msg = self.verificar_credenciales_admin(admin_username, admin_password)
+        ok_admin, admin_obj, msg = self.verificar_credenciales(admin_username, admin_password)
+        if ok_admin and admin_obj.rol.strip().casefold() not in ("administrador", "admin", "operador", "operator"):
+            ok_admin, msg = False, "Se requiere una cuenta de operador o administrador."
         if not ok_admin:
             self.log_auditoria(
                 admin_username or "ANONIMO",

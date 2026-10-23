@@ -272,7 +272,13 @@ class LoginDialog(tk.Toplevel):
                 "EXITO"
             )
             self.on_success(user_obj)
-            self.destroy()
+            # on_success puede destruir el root padre; en ese caso Tk ya destruyó
+            # también este Toplevel y destroy() vuelve a lanzar TclError.
+            try:
+                if self.winfo_exists():
+                    self.destroy()
+            except tk.TclError:
+                pass
         else:
             self.db.log_auditoria(
                 usuario,
@@ -307,13 +313,15 @@ class ConfirmAdminDialog(tk.Toplevel):
         db: Database,
         accion_titulo: str,
         mensaje_detalles: str,
-        default_user: str = ""
+        default_user: str = "",
+        allow_operator: bool = False
     ):
         super().__init__(parent)
         self.db = db
         self.accion_titulo = accion_titulo
         self.mensaje_detalles = mensaje_detalles
         self.default_user = default_user
+        self.allow_operator = allow_operator
         self.resultado = (False, None, None)
 
         self.title("ITSX - Re-autenticación de Seguridad")
@@ -331,10 +339,19 @@ class ConfirmAdminDialog(tk.Toplevel):
 
         self.configure(bg=self.COLOR_BG)
         self.transient(parent)
-        self.grab_set()
 
         self._build_ui()
         self._center_window(parent)
+        self.after_idle(self._activate_modal)
+
+    def _activate_modal(self):
+        """Toma el grab solo después de que el Toplevel ya sea visible para Tk."""
+        try:
+            if self.winfo_exists() and self.winfo_viewable():
+                self.lift()
+                self.grab_set()
+        except tk.TclError:
+            pass
 
     def _center_window(self, parent):
         self.update_idletasks()
@@ -383,7 +400,7 @@ class ConfirmAdminDialog(tk.Toplevel):
         form_card.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         tk.Label(
-            form_card, text="Usuario Administrador:", font=("Helvetica", 9, "bold"),
+            form_card, text="Usuario autorizado:", font=("Helvetica", 9, "bold"),
             fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL
         ).pack(anchor=tk.W, pady=(0, 2))
 
@@ -396,7 +413,7 @@ class ConfirmAdminDialog(tk.Toplevel):
             self.ent_admin_user.insert(0, self.default_user)
 
         tk.Label(
-            form_card, text="Contraseña de Administrador:", font=("Helvetica", 9, "bold"),
+            form_card, text="Contraseña:", font=("Helvetica", 9, "bold"),
             fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL
         ).pack(anchor=tk.W, pady=(0, 2))
 
@@ -439,10 +456,15 @@ class ConfirmAdminDialog(tk.Toplevel):
         p = self.ent_admin_pass.get()
 
         if not u or not p:
-            self.lbl_error.config(text="⚠️ Ingrese usuario y contraseña de administrador.")
+            self.lbl_error.config(text="⚠️ Ingrese usuario y contraseña.")
             return
 
-        ok, admin_obj, msg = self.db.verificar_credenciales_admin(u, p)
+        if self.allow_operator:
+            ok, admin_obj, msg = self.db.verificar_credenciales(u, p)
+            if ok and admin_obj.rol.strip().casefold() not in ("administrador", "admin", "operador", "operator"):
+                ok, msg = False, "Se requiere una cuenta de operador o administrador."
+        else:
+            ok, admin_obj, msg = self.db.verificar_credenciales_admin(u, p)
         if not ok:
             self.lbl_error.config(text=f"❌ {msg}")
             self.ent_admin_pass.delete(0, tk.END)
@@ -463,10 +485,11 @@ class ConfirmAdminDialog(tk.Toplevel):
         db: Database,
         accion_titulo: str,
         mensaje_detalles: str,
-        default_user: str = ""
+        default_user: str = "",
+        allow_operator: bool = False
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """Abre el modal sincrónicamente y retorna (autorizado, admin_user, admin_pass)."""
-        dlg = cls(parent, db, accion_titulo, mensaje_detalles, default_user)
+        dlg = cls(parent, db, accion_titulo, mensaje_detalles, default_user, allow_operator)
         dlg.wait_window()
         return dlg.resultado
 
@@ -476,10 +499,11 @@ class EditEstudianteDialog(tk.Toplevel):
     Diálogo para editar los datos de un estudiante registrado.
     """
 
-    def __init__(self, parent, estudiante: Estudiante, carreras_catalogo: List[str]):
+    def __init__(self, parent, estudiante: Estudiante, carreras_catalogo: List[str], es_invitado: bool = False):
         super().__init__(parent)
         self.estudiante = estudiante
         self.carreras_catalogo = carreras_catalogo
+        self.es_invitado = es_invitado
         self.confirmado = False
         self.nuevo_nombre = estudiante.nombre
         self.nueva_carrera = estudiante.carrera or ""
@@ -497,10 +521,18 @@ class EditEstudianteDialog(tk.Toplevel):
 
         self.configure(bg=self.COLOR_BG)
         self.transient(parent)
-        self.grab_set()
 
         self._build_ui()
         self._center_window(parent)
+        self.after_idle(self._activate_modal)
+
+    def _activate_modal(self):
+        try:
+            if self.winfo_exists() and self.winfo_viewable():
+                self.lift()
+                self.grab_set()
+        except tk.TclError:
+            pass
 
     def _center_window(self, parent):
         self.update_idletasks()
@@ -535,13 +567,19 @@ class EditEstudianteDialog(tk.Toplevel):
         self.ent_nombre.pack(fill=tk.X, pady=(2, 10))
         self.ent_nombre.insert(0, self.estudiante.nombre)
 
-        tk.Label(card, text="Carrera / Programa Académico:", font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
-        self.cmb_carrera = ttk.Combobox(card, values=self.carreras_catalogo, font=("Helvetica", 10), state="readonly")
-        self.cmb_carrera.pack(fill=tk.X, pady=(2, 4))
-        if self.estudiante.carrera in self.carreras_catalogo:
-            self.cmb_carrera.set(self.estudiante.carrera)
-        elif self.carreras_catalogo:
-            self.cmb_carrera.set(self.carreras_catalogo[0])
+        etiqueta = "Empresa / motivo de visita:" if self.es_invitado else "Carrera / Programa Académico:"
+        tk.Label(card, text=etiqueta, font=("Helvetica", 9, "bold"), fg="#ffffff", bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        if self.es_invitado:
+            self.ent_carrera = tk.Entry(card, font=("Helvetica", 10), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=5, relief=tk.FLAT)
+            self.ent_carrera.pack(fill=tk.X, pady=(2, 4))
+            self.ent_carrera.insert(0, self.estudiante.carrera or "")
+        else:
+            self.cmb_carrera = ttk.Combobox(card, values=self.carreras_catalogo, font=("Helvetica", 10), state="readonly")
+            self.cmb_carrera.pack(fill=tk.X, pady=(2, 4))
+            if self.estudiante.carrera in self.carreras_catalogo:
+                self.cmb_carrera.set(self.estudiante.carrera)
+            elif self.carreras_catalogo:
+                self.cmb_carrera.set(self.carreras_catalogo[0])
 
         tk.Label(
             card, text="ℹ️ Se solicitarán credenciales de administrador para autorizar el cambio.",
@@ -564,7 +602,7 @@ class EditEstudianteDialog(tk.Toplevel):
 
     def _on_guardar(self):
         nom = self.ent_nombre.get().strip()
-        car = self.cmb_carrera.get().strip()
+        car = (self.ent_carrera.get() if self.es_invitado else self.cmb_carrera.get()).strip()
         if not nom:
             messagebox.showerror("Campo Requerido", "El nombre completo no puede estar vacío.", parent=self)
             return
@@ -666,6 +704,52 @@ class CrearUsuarioDialog(tk.Toplevel):
             return
 
         self.datos = {"nombre": nom, "username": usr, "password": pwd, "rol": rol}
+        self.confirmado = True
+        self.destroy()
+
+
+class EditarUsuarioDialog(tk.Toplevel):
+    """Formulario de edición de una cuenta, con cambio de contraseña opcional."""
+    def __init__(self, parent, usuario: Usuario):
+        super().__init__(parent)
+        self.usuario = usuario
+        self.confirmado = False
+        self.datos = None
+        self.title("Editar usuario del sistema")
+        self.geometry("440x430")
+        self.resizable(False, False)
+        self.configure(bg="#0B1120")
+        self.transient(parent)
+        self.grab_set()
+        panel = tk.Frame(self, bg="#151F32", padx=22, pady=18)
+        panel.pack(fill=tk.BOTH, expand=True, padx=18, pady=18)
+        tk.Label(panel, text="Editar usuario", bg="#151F32", fg="#E5A823", font=("Helvetica", 14, "bold")).pack(anchor=tk.W, pady=(0, 12))
+        self.entries = {}
+        for key, label, initial in (("username", "Usuario", usuario.username), ("nombre", "Nombre completo", usuario.nombre_completo)):
+            tk.Label(panel, text=label, bg="#151F32", fg="#ffffff").pack(anchor=tk.W)
+            ent = tk.Entry(panel, bg="#1E293B", fg="#ffffff", insertbackground="#ffffff")
+            ent.pack(fill=tk.X, pady=(3, 10))
+            ent.insert(0, initial)
+            self.entries[key] = ent
+        tk.Label(panel, text="Rol", bg="#151F32", fg="#ffffff").pack(anchor=tk.W)
+        self.cmb_rol = ttk.Combobox(panel, values=("operador", "administrador"), state="readonly")
+        self.cmb_rol.set(usuario.rol.lower())
+        self.cmb_rol.pack(fill=tk.X, pady=(3, 10))
+        tk.Label(panel, text="Nueva contraseña (opcional)", bg="#151F32", fg="#ffffff").pack(anchor=tk.W)
+        self.ent_password = tk.Entry(panel, show="•", bg="#1E293B", fg="#ffffff", insertbackground="#ffffff")
+        self.ent_password.pack(fill=tk.X, pady=(3, 16))
+        controls = tk.Frame(panel, bg="#151F32")
+        controls.pack(fill=tk.X)
+        tk.Button(controls, text="Cancelar", command=self.destroy, bg="#475569", fg="#ffffff", relief=tk.FLAT, padx=12, pady=6).pack(side=tk.LEFT)
+        tk.Button(controls, text="Guardar", command=self._guardar, bg="#10B981", fg="#ffffff", relief=tk.FLAT, padx=14, pady=6).pack(side=tk.RIGHT)
+
+    def _guardar(self):
+        username = self.entries["username"].get().strip()
+        nombre = self.entries["nombre"].get().strip()
+        if not username or not nombre:
+            messagebox.showerror("Datos requeridos", "Usuario y nombre son obligatorios.", parent=self)
+            return
+        self.datos = {"username": username, "nombre": nombre, "rol": self.cmb_rol.get(), "password": self.ent_password.get()}
         self.confirmado = True
         self.destroy()
 
@@ -801,28 +885,49 @@ class AvisoPrivacidadDialog(tk.Toplevel):
 
         self.title("Aviso de Privacidad Integral — ITSX")
         self.resizable(True, True)
-        self.minsize(680, 600)
-
-        # Paleta institucional
-        self.BG          = "#0B1120"
-        self.PANEL       = "#151F32"
-        self.CARD        = "#1E293B"
-        self.BORDER      = "#2D3F5C"
-        self.GOLD        = "#E5A823"
-        self.GOLD_LIGHT  = "#F5C84C"
-        self.ACCENT      = "#38BDF8"
-        self.GREEN       = "#10B981"
-        self.RED         = "#F87171"
-        self.TEXT        = "#F1F5F9"
-        self.MUTED       = "#64748B"
-        self.SECTION_CLR = "#0EA5E9"
+        self.minsize(700, 620)
+        self.tema = "oscuro"
+        self._configurar_paleta()
 
         self.configure(bg=self.BG)
         self.transient(parent)
-        self.grab_set()
 
         self._build_ui()
         self._center_window(parent)
+        self.after_idle(self._activar_modal)
+
+    def _configurar_paleta(self):
+        if self.tema == "oscuro":
+            colors = {
+                "BG":"#0B1120", "PANEL":"#151F32", "CARD":"#1E293B", "BORDER":"#2D3F5C",
+                "GOLD":"#E5A823", "GOLD_LIGHT":"#F5C84C", "ACCENT":"#38BDF8", "GREEN":"#10B981",
+                "RED":"#F87171", "TEXT":"#F1F5F9", "MUTED":"#94A3B8", "SECTION_CLR":"#38BDF8"
+            }
+        else:
+            colors = {
+                "BG":"#F1F5F9", "PANEL":"#FFFFFF", "CARD":"#F8FAFC", "BORDER":"#CBD5E1",
+                "GOLD":"#A16207", "GOLD_LIGHT":"#CA8A04", "ACCENT":"#0369A1", "GREEN":"#047857",
+                "RED":"#B91C1C", "TEXT":"#0F172A", "MUTED":"#475569", "SECTION_CLR":"#0369A1"
+            }
+        for name, value in colors.items():
+            setattr(self, name, value)
+
+    def _activar_modal(self):
+        try:
+            if self.winfo_exists() and self.winfo_viewable():
+                self.lift()
+                self.grab_set()
+        except tk.TclError:
+            pass
+
+    def _alternar_tema(self):
+        self.tema = "claro" if self.tema == "oscuro" else "oscuro"
+        self._configurar_paleta()
+        self.configure(bg=self.BG)
+        for child in self.winfo_children():
+            child.destroy()
+        self._build_ui()
+        self.after_idle(self._activar_modal)
 
     def _center_window(self, parent):
         self.update_idletasks()
@@ -833,49 +938,33 @@ class AvisoPrivacidadDialog(tk.Toplevel):
             py = parent.winfo_y()
         except Exception:
             pw, ph, px, py = 1280, 800, 80, 80
-        w, h = 720, 620
-        x = px + max(0, (pw - w) // 2)
-        y = py + max(0, (ph - h) // 2)
+        screen_w, screen_h = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(860, screen_w - 60), min(760, screen_h - 100)
+        x = max(0, px + (pw - w) // 2)
+        y = max(0, py + (ph - h) // 2)
         self.geometry(f"{w}x{h}+{x}+{y}")
 
     def _build_ui(self):
-        # ── Header con degradado visual ──────────────────────────────────────
-        header = tk.Frame(self, bg=self.PANEL, padx=24, pady=16)
+        # Encabezado en dos filas para evitar que los textos largos se encimen.
+        header = tk.Frame(self, bg=self.PANEL, padx=22, pady=14)
         header.pack(fill=tk.X)
-
-        left_h = tk.Frame(header, bg=self.PANEL)
-        left_h.pack(side=tk.LEFT, fill=tk.Y)
-
-        tk.Label(
-            left_h,
-            text="🔒  AVISO DE PRIVACIDAD INTEGRAL",
-            font=("Helvetica", 14, "bold"),
-            fg=self.GOLD, bg=self.PANEL
-        ).pack(anchor=tk.W)
-
-        tk.Label(
-            left_h,
-            text="Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP)",
-            font=("Helvetica", 8),
-            fg=self.MUTED, bg=self.PANEL
-        ).pack(anchor=tk.W, pady=(2, 0))
-
-        # Etiqueta LFPDPPP al lado derecho
-        badge = tk.Label(
-            header,
-            text=" LFPDPPP\n Arts. 3 · 7 · 13 · 16 ",
-            font=("Helvetica", 8, "bold"),
-            fg=self.BG, bg=self.GOLD,
-            padx=8, pady=4
-        )
-        badge.pack(side=tk.RIGHT, padx=(12, 0))
-
-        tk.Label(
-            header,
-            text="Instituto Tecnológico Superior de Xalapa (ITSX)",
-            font=("Helvetica", 9, "bold"),
-            fg=self.ACCENT, bg=self.PANEL
-        ).pack(side=tk.RIGHT)
+        header_top = tk.Frame(header, bg=self.PANEL)
+        header_top.pack(fill=tk.X)
+        tk.Label(header_top, text="🔒  AVISO DE PRIVACIDAD INTEGRAL",
+                 font=("Helvetica", 14, "bold"), fg=self.GOLD, bg=self.PANEL).pack(side=tk.LEFT, anchor=tk.W)
+        theme_text = "☀  Modo claro" if self.tema == "oscuro" else "🌙  Modo oscuro"
+        tk.Button(header_top, text=theme_text, command=self._alternar_tema,
+                  font=("Helvetica", 9, "bold"), bg=self.CARD, fg=self.TEXT,
+                  activebackground=self.BORDER, activeforeground=self.TEXT,
+                  relief=tk.FLAT, padx=12, pady=6, cursor="hand2").pack(side=tk.RIGHT)
+        tk.Label(header, text="Ley Federal de Protección de Datos Personales en Posesión de los Particulares (LFPDPPP)",
+                 font=("Helvetica", 9), fg=self.MUTED, bg=self.PANEL).pack(anchor=tk.W, pady=(4, 8))
+        header_bottom = tk.Frame(header, bg=self.PANEL)
+        header_bottom.pack(fill=tk.X)
+        tk.Label(header_bottom, text="Instituto Tecnológico Superior de Xalapa (ITSX)",
+                 font=("Helvetica", 9, "bold"), fg=self.ACCENT, bg=self.PANEL).pack(side=tk.LEFT)
+        tk.Label(header_bottom, text="LFPDPPP  ·  Arts. 3, 7, 13 y 16", font=("Helvetica", 8, "bold"),
+                 fg="#0B1120" if self.tema == "oscuro" else "#FFFFFF", bg=self.GOLD, padx=9, pady=4).pack(side=tk.RIGHT)
 
         # Separador decorativo
         sep = tk.Frame(self, bg=self.GOLD, height=2)
@@ -1032,19 +1121,22 @@ class AvisoPrivacidadDialog(tk.Toplevel):
         tk.Label(
             footer,
             text="Conforme a la LFPDPPP, los datos biométricos requieren consentimiento expreso e informado. Puede otorgarlo o denegarlo a continuación.",
-            font=("Helvetica", 8, "italic"),
+            font=("Helvetica", 9, "italic"),
             fg=self.MUTED, bg=self.PANEL,
-            wraplength=350, justify=tk.LEFT
-        ).pack(side=tk.LEFT)
+            wraplength=760, justify=tk.LEFT, anchor="w"
+        ).pack(fill=tk.X, pady=(0, 10))
+
+        actions = tk.Frame(footer, bg=self.PANEL)
+        actions.pack(fill=tk.X)
 
         if self.on_accept or self.on_reject:
-            btn_box = tk.Frame(footer, bg=self.PANEL)
+            btn_box = tk.Frame(actions, bg=self.PANEL)
             btn_box.pack(side=tk.RIGHT)
 
             if self.on_reject:
                 btn_rej = tk.Button(
                     btn_box,
-                    text="✗ Denegar Consentimiento",
+                    text="✗ Denegar consentimiento",
                     font=("Helvetica", 10, "bold"),
                     bg="#991B1B", fg="#ffffff",
                     activebackground="#DC2626", activeforeground="#ffffff",
@@ -1056,7 +1148,7 @@ class AvisoPrivacidadDialog(tk.Toplevel):
             if self.on_accept:
                 btn_acc = tk.Button(
                     btn_box,
-                    text="✓ Aceptar y Otorgar",
+                    text="✓ Aceptar y otorgar",
                     font=("Helvetica", 10, "bold"),
                     bg="#059669", fg="#ffffff",
                     activebackground="#10B981", activeforeground="#ffffff",
@@ -1066,11 +1158,11 @@ class AvisoPrivacidadDialog(tk.Toplevel):
                 btn_acc.pack(side=tk.LEFT, padx=5)
         else:
             tk.Button(
-                footer,
-                text="  ✓  Entendido y Cerrar  ",
+                actions,
+                text="  ✓  Entendido y cerrar  ",
                 font=("Helvetica", 10, "bold"),
-                bg=self.GOLD, fg="#000000",
-                activebackground=self.GOLD_LIGHT, activeforeground="#000000",
+                bg=self.GOLD, fg="#0B1120" if self.tema == "oscuro" else "#FFFFFF",
+                activebackground=self.GOLD_LIGHT, activeforeground="#0B1120" if self.tema == "oscuro" else "#FFFFFF",
                 relief=tk.FLAT, padx=14, pady=6,
                 cursor="hand2",
                 command=self.destroy

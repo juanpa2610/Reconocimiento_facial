@@ -185,7 +185,7 @@ def iniciar_control_acceso(video_source=config.VIDEO_SOURCE):
                             db.log_acceso(
                                 estudiante_id=None,
                                 matricula=None,
-                                nombre="Desconocido",
+                                nombre=config.NOMBRE_NO_REGISTRADO,
                                 distancia=match_result.distancia,
                                 estado="DENEGADO"
                             )

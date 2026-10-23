@@ -32,6 +32,7 @@ from src.db.models import Estudiante, Usuario, CamaraConfig, RegistroAuditoria
 from src.db.school_db_sim import buscar_en_base_escolar
 from src.biometrics.encoder import FaceEncoder
 from src.biometrics.matcher import FaceMatcher, MatchResult
+from src.biometrics.liveness import BlinkLivenessDetector
 from src.modules.registro import verificar_rostro_previo
 from src.utils.visualizer import Visualizer
 from src.utils.video_stream import ThreadedCamera
@@ -42,10 +43,20 @@ from src.gui.dialogs import (
     ConfirmAdminDialog,
     EditEstudianteDialog,
     CrearUsuarioDialog,
+    EditarUsuarioDialog,
     CambiarPasswordDialog,
     AvisoPrivacidadDialog,
     PrimerInicioAdminDialog
 )
+from src.utils.text_filters import (
+    normalizar_texto,
+    coincide_nombre,
+    validar_fecha,
+    validar_hora,
+    validar_rango_fechas,
+    validar_rango_horas
+)
+from src.utils.validators import validar_matricula_itsx
 from src.modules.admin import exportar_accesos_excel, generar_reporte_diario_excel
 
 try:
@@ -74,6 +85,19 @@ CARRERAS_ITSX = [
     "Personal Docente / Administrativo"
 ]
 
+# Catálogo oficial de motivos de visita para invitados / proveedores
+MOTIVOS_VISITA = [
+    "Invitado",
+    "Ventas",
+    "Proveedor / Entregas",
+    "Servicio / Mantenimiento",
+    "Trámites Administrativos",
+    "Reunión / Asesoría",
+    "Conferencia / Evento",
+    "Visita Escolar / Recorrido",
+    "Otro (Especifique)"
+]
+
 
 class GuardApp:
     def __init__(self, root: tk.Tk, current_user: Optional[Usuario] = None):
@@ -93,12 +117,33 @@ class GuardApp:
         self.COLOR_GREEN = "#10B981"       # Verde esmeralda vivo
         self.COLOR_RED = "#EF4444"         # Rojo rubí
         self.COLOR_ACCENT = "#38BDF8"      # Cyan tecnológico
+        self.tema = "oscuro"
+        self._paletas_tema = {
+            "oscuro": {
+                "#0B1120":"#F1F5F9", "#151F32":"#FFFFFF", "#1E293B":"#F8FAFC",
+                "#334155":"#CBD5E1", "#2D3F5C":"#CBD5E1", "#475569":"#E2E8F0",
+                "#F8FAFC":"#0F172A", "#F1F5F9":"#0F172A", "#FFFFFF":"#0F172A",
+                "#94A3B8":"#475569", "#E5A823":"#A16207", "#F59E0B":"#A16207",
+                "#38BDF8":"#0369A1", "#10B981":"#047857", "#EF4444":"#B91C1C",
+                "#0284C7":"#0284C7", "#059669":"#047857", "#D97706":"#A16207"
+            },
+            "claro": {
+                "#F1F5F9":"#0B1120", "#FFFFFF":"#151F32", "#F8FAFC":"#1E293B",
+                "#CBD5E1":"#334155", "#E2E8F0":"#475569", "#0F172A":"#F8FAFC",
+                "#475569":"#94A3B8", "#A16207":"#E5A823", "#0369A1":"#38BDF8",
+                "#047857":"#10B981", "#B91C1C":"#EF4444", "#D97706":"#E5A823"
+            }
+        }
 
         self.root.configure(bg=self.COLOR_BG)
 
         # Base de datos y autenticación
         self.db = Database()
         self.db.init_db()
+        try:
+            self.db.purgar_invitados_expirados()
+        except Exception as exc:
+            print(f"[!] No se pudieron purgar invitados expirados al iniciar: {exc}")
         self.current_user: Optional[Usuario] = current_user
 
         # Motor biométrico
@@ -135,6 +180,10 @@ class GuardApp:
         # Caché de resultados para procesar solo 1 de cada N cuadros (baja latencia)
         self._frame_counter = 0
         self._cache_acceso = []          # lista de dicts con caja + datos de coincidencia
+        self._liveness_by_person = {}
+        self._liveness_face_key = None
+        self._liveness_started_at = None
+        self._liveness_variation = {}
         self._cache_landmarks = []       # landmarks del rostro en la pestaña de registro
         self._cache_n_rostros_reg = 0
 
@@ -158,6 +207,11 @@ class GuardApp:
         self.var_tipo_registro = tk.StringVar(value="escolar")
         self.datos_escolares_confirmados = False
         self.nuevo_vector_candidato: Optional[np.ndarray] = None
+        self._registro_liveness_detector = BlinkLivenessDetector()
+        self._registro_liveness_active = False
+        self._registro_liveness_ok = False
+        self._registro_liveness_encoding = None
+        self._registro_liveness_started_at = None
 
         # Cargar recursos gráficos (Logo ITSX)
         self._cargar_recursos()
@@ -171,6 +225,9 @@ class GuardApp:
         # Iniciar reloj institucional
         self._actualizar_reloj()
 
+        # Programar mantenimiento preventivo y reporte diario automático en segundo plano (Guadalupe Velázquez)
+        self.root.after(1000, self._ejecutar_mantenimiento_asincrono)
+
         # Si ya se autenticó previamente (flujo de login exclusivo inicial)
         if self.current_user:
             self._aplicar_permisos_usuario()
@@ -181,11 +238,40 @@ class GuardApp:
 
         # Evento de cierre
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.root.after(60 * 60 * 1000, self._purgar_invitados_periodicamente)
+
+    def _purgar_invitados_periodicamente(self):
+        """Aplica la vigencia de 24 horas aun si la aplicación permanece abierta."""
+        try:
+            eliminados = self.db.purgar_invitados_expirados()
+            if eliminados:
+                self._recargar_alumnos()
+        except Exception as exc:
+            print(f"[!] No se pudieron purgar invitados expirados: {exc}")
+        try:
+            if self.root.winfo_exists():
+                self.root.after(60 * 60 * 1000, self._purgar_invitados_periodicamente)
+        except tk.TclError:
+            pass
 
     def _iniciar_camara_segura(self):
         if not self._camera_started:
             self._iniciar_camara()
             self._camera_started = True
+
+    def _ejecutar_mantenimiento_asincrono(self):
+        """Ejecuta reporte diario y rotación preventiva en hilo secundario para no congelar la GUI."""
+        def _tarea():
+            try:
+                from datetime import date, timedelta
+                today = date.today()
+                candidates = [day for day in self.db.obtener_fechas_accesos() if day <= (today - timedelta(days=config.LOG_KEEP_DAYS)).isoformat()]
+                for day in candidates:
+                    self._exportar_y_limpiar_dia(day, show_errors=False)
+                self.db.rotar_registros_antiguos()
+            except Exception as err:
+                print(f"[!] Mantenimiento preventivo al iniciar: {err}")
+        threading.Thread(target=_tarea, daemon=True).start()
 
     def _cargar_recursos(self):
         """Carga y procesa el escudo y logotipo oficial del ITSX en alta calidad."""
@@ -239,7 +325,7 @@ class GuardApp:
                         font=("Helvetica", 10))
         style.configure("Treeview.Heading",
                         background=self.COLOR_CARD,
-                        foreground="#38BDF8",
+                        foreground=self.COLOR_ACCENT,
                         padding=[10, 6],
                         font=("Helvetica", 10, "bold"))
         style.map("Treeview", background=[("selected", "#0284C7")])
@@ -248,13 +334,41 @@ class GuardApp:
         style.configure("TCombobox",
                         fieldbackground=self.COLOR_CARD,
                         background=self.COLOR_CARD,
-                        foreground="#FFFFFF",
+                        foreground=self.COLOR_TEXT,
                         selectbackground="#0284C7",
-                        selectforeground="#FFFFFF",
-                        arrowcolor="#FFFFFF")
+                        selectforeground=self.COLOR_TEXT,
+                        arrowcolor=self.COLOR_TEXT)
         style.map("TCombobox",
                   fieldbackground=[("readonly", self.COLOR_CARD)],
-                  foreground=[("readonly", "#FFFFFF")])
+                  foreground=[("readonly", self.COLOR_TEXT)])
+
+    def _alternar_tema(self):
+        """Cambia la paleta de toda la ventana principal y sus widgets existentes."""
+        old_theme = self.tema
+        self.tema = "claro" if old_theme == "oscuro" else "oscuro"
+        colors = self._paletas_tema[old_theme]
+        for name in ("COLOR_BG", "COLOR_PANEL", "COLOR_CARD", "COLOR_CARD_BORDER", "COLOR_TEXT",
+                     "COLOR_TEXT_MUTED", "COLOR_GOLD_ITSX", "COLOR_GREEN", "COLOR_RED", "COLOR_ACCENT"):
+            setattr(self, name, colors.get(getattr(self, name).upper(), getattr(self, name)))
+
+        def recolorear(widget):
+            try:
+                options = widget.configure()
+                for option in ("bg", "background", "fg", "foreground", "activebackground", "activeforeground",
+                               "insertbackground", "selectbackground", "selectforeground", "highlightbackground"):
+                    if option not in options:
+                        continue
+                    current = str(widget.cget(option)).upper()
+                    replacement = colors.get(current)
+                    if replacement:
+                        widget.configure(**{option: replacement})
+            except (tk.TclError, TypeError):
+                pass
+            for child in widget.winfo_children():
+                recolorear(child)
+
+        recolorear(self.root)
+        self._setup_styles()
 
     def _build_header(self):
         header = tk.Frame(self.root, bg=self.COLOR_PANEL, height=82, padx=20, pady=10)
@@ -319,21 +433,6 @@ class GuardApp:
         )
         self.lbl_clock.pack(side=tk.LEFT, padx=(0, 12))
 
-        self.btn_cambiar_pass = tk.Button(
-            top_right_row,
-            text="🔑 Cambiar Clave",
-            font=("Helvetica", 9, "bold"),
-            bg="#1E293B",
-            fg=self.COLOR_GOLD_ITSX,
-            activebackground="#334155",
-            relief=tk.FLAT,
-            padx=8,
-            pady=3,
-            cursor="hand2",
-            command=self._abrir_cambiar_password
-        )
-        self.btn_cambiar_pass.pack(side=tk.LEFT, padx=(0, 6))
-
         self.btn_logout = tk.Button(
             top_right_row,
             text="🚪 Cerrar Sesión",
@@ -347,7 +446,7 @@ class GuardApp:
             cursor="hand2",
             command=self._cerrar_sesion
         )
-        self.btn_logout.pack(side=tk.RIGHT)
+        self.btn_logout.pack(side=tk.LEFT, padx=(0, 0))
 
         # Badge de usuario y estado de base de datos
         badge = tk.Frame(right_box, bg=self.COLOR_CARD, padx=12, pady=4, bd=1, relief=tk.GROOVE)
@@ -759,6 +858,7 @@ class GuardApp:
 
         # Combobox auxiliar para mantener compatibilidad con métodos existentes
         self.cmb_carrera = ttk.Combobox(self.frame_modo_escolar, values=CARRERAS_ITSX)
+        self.cmb_carrera.configure(state="readonly")
         self.cmb_carrera.set("Ingeniería en Sistemas Computacionales")
 
         # --- B) SUBFRAME PARA INVITADOS / PROVEEDORES (Sin base escolar) ---
@@ -780,11 +880,28 @@ class GuardApp:
                                        bg=self.COLOR_CARD, fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT)
         self.ent_nombre_inv.pack(fill=tk.X, pady=(0, 6))
 
-        tk.Label(self.frame_modo_invitado, text="Asunto / Motivo de Visita o Venta:*",
+        tk.Label(self.frame_modo_invitado, text="Asunto / Motivo de Visita:*",
                  font=("Helvetica", 10, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(4, 2))
-        self.ent_asunto_inv = tk.Entry(self.frame_modo_invitado, font=("Helvetica", 11),
-                                       bg=self.COLOR_CARD, fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT)
+        self.ent_asunto_inv = ttk.Combobox(
+            self.frame_modo_invitado,
+            font=("Helvetica", 11),
+            values=MOTIVOS_VISITA,
+            state="readonly"
+        )
+        self.ent_asunto_inv.set("Invitado")
         self.ent_asunto_inv.pack(fill=tk.X, pady=(0, 6))
+        self.ent_asunto_inv.bind("<<ComboboxSelected>>", self._actualizar_campo_otro_motivo)
+
+        self.frm_otro_motivo = tk.Frame(self.frame_modo_invitado, bg=self.COLOR_PANEL)
+        tk.Label(
+            self.frm_otro_motivo, text="Especifique el motivo de visita:*",
+            font=("Helvetica", 9, "bold"), fg=self.COLOR_TEXT, bg=self.COLOR_PANEL
+        ).pack(anchor=tk.W, pady=(0, 2))
+        self.ent_otro_motivo = tk.Entry(
+            self.frm_otro_motivo, font=("Helvetica", 10), bg=self.COLOR_CARD,
+            fg="#ffffff", insertbackground=self.COLOR_ACCENT, bd=6, relief=tk.FLAT
+        )
+        self.ent_otro_motivo.pack(fill=tk.X, pady=(0, 6))
 
         tk.Label(self.frame_modo_invitado, text="Empresa o Procedencia (Opcional):",
                  font=("Helvetica", 9, "bold"), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(3, 2))
@@ -883,13 +1000,6 @@ class GuardApp:
         )
         btn_export_excel.pack(side=tk.RIGHT, padx=5)
 
-        btn_export = tk.Button(
-            toolbar, text="📥  Exportar a CSV", font=("Helvetica", 10, "bold"),
-            bg="#0284C7", fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
-            command=self._exportar_csv
-        )
-        btn_export.pack(side=tk.RIGHT, padx=5)
-
         btn_refresh = tk.Button(
             toolbar, text="🔄  Actualizar", font=("Helvetica", 10, "bold"),
             bg=self.COLOR_PANEL, fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
@@ -984,13 +1094,6 @@ class GuardApp:
         )
         btn_limpiar.pack(side=tk.LEFT, padx=(0, 4))
 
-        btn_reporte_diario = tk.Button(
-            row2, text="📅 Reporte Diario", font=("Helvetica", 8, "bold"),
-            bg=self.COLOR_GREEN, fg="#ffffff", activebackground="#059669", activeforeground="#ffffff",
-            relief=tk.FLAT, padx=6, pady=2, cursor="hand2", command=self._generar_reporte_diario_automatico
-        )
-        btn_reporte_diario.pack(side=tk.LEFT)
-
         self.lbl_aviso_filtro_accesos = tk.Label(
             filter_box, text="", font=("Helvetica", 8, "bold"), fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL
         )
@@ -1023,27 +1126,13 @@ class GuardApp:
 
         r_top = tk.Frame(f_right, bg=self.COLOR_PANEL)
         r_top.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(r_top, text="PADRÓN BIOMÉTRICO (ALUMNOS ACTIVOS)", font=("Helvetica", 10, "bold"),
+        tk.Label(r_top, text="PADRÓN BIOMÉTRICO (COMUNIDAD ITSX E INVITADOS)", font=("Helvetica", 10, "bold"),
                  fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
-
-        btn_del = tk.Button(
-            r_top, text="🗑️  Eliminar", font=("Helvetica", 9, "bold"),
-            bg=self.COLOR_RED, fg="#ffffff", relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
-            command=self._eliminar_alumno_seleccionado
-        )
-        btn_del.pack(side=tk.RIGHT)
-
-        btn_edit = tk.Button(
-            r_top, text="✏️  Editar", font=("Helvetica", 9, "bold"),
-            bg="#D97706", fg="#ffffff", relief=tk.FLAT, padx=8, pady=3, cursor="hand2",
-            command=self._editar_alumno_seleccionado
-        )
-        btn_edit.pack(side=tk.RIGHT, padx=(0, 6))
 
         # Buscador de Alumnos
         filter_bar_est = tk.Frame(f_right, bg=self.COLOR_PANEL)
         filter_bar_est.pack(fill=tk.X, pady=(0, 6))
-        tk.Label(filter_bar_est, text="Buscar alumno:", font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
+        tk.Label(filter_bar_est, text="Buscar persona:", font=("Helvetica", 9), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(side=tk.LEFT)
         self.ent_buscar_estudiante = tk.Entry(filter_bar_est, font=("Helvetica", 9), bg=self.COLOR_CARD, fg="#ffffff", insertbackground="#fff", bd=3, relief=tk.FLAT)
         self.ent_buscar_estudiante.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 0))
         self.ent_buscar_estudiante.bind("<KeyRelease>", lambda e: self._filtrar_estudiantes())
@@ -1052,24 +1141,27 @@ class GuardApp:
         )
         self.lbl_aviso_filtro_estudiantes.pack(anchor=tk.W, pady=(0, 4))
 
-        cols_est = ("id", "matricula", "nombre", "carrera", "tam")
+        cols_est = ("id", "matricula", "nombre", "carrera", "tam", "accion")
+        self._padron_action_buttons = {}
         self.tree_estudiantes = ttk.Treeview(f_right, columns=cols_est, show="headings", height=16)
         self.tree_estudiantes.heading("id", text="ID")
         self.tree_estudiantes.heading("matricula", text="Matrícula")
         self.tree_estudiantes.heading("nombre", text="Nombre")
         self.tree_estudiantes.heading("carrera", text="Carrera")
         self.tree_estudiantes.heading("tam", text="Tam. Vector")
+        self.tree_estudiantes.heading("accion", text="Acción")
 
         self.tree_estudiantes.column("id", width=40, anchor=tk.CENTER)
         self.tree_estudiantes.column("matricula", width=95, anchor=tk.CENTER)
         self.tree_estudiantes.column("nombre", width=140)
         self.tree_estudiantes.column("carrera", width=130)
         self.tree_estudiantes.column("tam", width=85, anchor=tk.CENTER)
-
-        scroll_est = ttk.Scrollbar(f_right, orient=tk.VERTICAL, command=self.tree_estudiantes.yview)
-        self.tree_estudiantes.configure(yscroll=scroll_est.set)
+        self.tree_estudiantes.column("accion", width=150, anchor=tk.CENTER, stretch=False)
+        self.scroll_estudiantes = ttk.Scrollbar(f_right, orient=tk.VERTICAL, command=self._scroll_padron)
+        self.tree_estudiantes.configure(yscrollcommand=self._actualizar_scroll_padron)
+        self.tree_estudiantes.bind("<Configure>", lambda _e: self.root.after_idle(self._reposicionar_acciones_padron), add="+")
         self.tree_estudiantes.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scroll_est.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scroll_estudiantes.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _build_statusbar(self):
         bar = tk.Frame(self.root, bg=self.COLOR_PANEL, height=28, padx=16)
@@ -1174,6 +1266,7 @@ class GuardApp:
                     boxes = self.encoder.detect_face_locations_scaled(frame_rgb, config.DETECTION_WIDTH)
                     encodings = self.encoder.extract_encodings(frame_rgb, boxes)
                     matches = [self.matcher.match_candidate(enc) for enc in encodings]
+                    landmarks = face_recognition.face_landmarks(frame_rgb, face_locations=boxes) if config.ENABLE_LIVENESS_CHECK and boxes else []
 
                     # Medición real y comprobable de latencia punto a punto
                     t_proceso = time.perf_counter() - t_inicio
@@ -1188,7 +1281,7 @@ class GuardApp:
                     else:
                         condicion_luz = f"Iluminación óptima ({brillo_medio:.1f} lx)"
 
-                    self._vision_result_queue.put((boxes, encodings, matches, t_proceso, condicion_luz))
+                    self._vision_result_queue.put((boxes, encodings, matches, t_proceso, condicion_luz, landmarks, frame_rgb))
                 except Exception as e:
                     print(f"[!] Error en hilo de visión: {e}")
 
@@ -1258,8 +1351,12 @@ class GuardApp:
         # Recoger resultados del hilo de visión (sin bloquear)
         try:
             res_item = self._vision_result_queue.get_nowait()
-            if len(res_item) == 5:
-                boxes, encodings, matches, t_proceso, condicion_luz = res_item
+            landmarks = []
+            liveness_frame = None
+            if len(res_item) >= 5:
+                boxes, encodings, matches, t_proceso, condicion_luz = res_item[:5]
+                if len(res_item) >= 7:
+                    landmarks, liveness_frame = res_item[5:7]
             else:
                 boxes, encodings, matches = res_item
                 t_proceso, condicion_luz = 0.12, "Iluminación óptima"
@@ -1272,7 +1369,46 @@ class GuardApp:
                     alguien_reconocido = True
                     est = match.estudiante
                     t_acceso = round(float(t_proceso), 4)
-                    self.access_card_state = {
+                    live_ok = True
+                    if config.ENABLE_LIVENESS_CHECK:
+                        key = est.matricula
+                        if self._liveness_face_key != key:
+                            if self._liveness_face_key:
+                                old = self._liveness_by_person.get(self._liveness_face_key)
+                                if old: old.reset()
+                            self._liveness_face_key = key
+                            self._liveness_started_at = ahora
+                            self._liveness_by_person.setdefault(key, BlinkLivenessDetector()).reset()
+                            self._liveness_variation[key] = []
+                        detector = self._liveness_by_person[key]
+                        try:
+                            face_marks = landmarks[boxes.index(box)]
+                        except (ValueError, IndexError):
+                            face_marks = None
+                        live_ok = detector.update(face_marks)[0]
+                        if liveness_frame is not None:
+                            top, right, bottom, left = box
+                            crop = cv2.cvtColor(liveness_frame[max(0,top):bottom, max(0,left):right], cv2.COLOR_RGB2GRAY)
+                            if crop.size:
+                                tiny = cv2.resize(crop, (16, 16), interpolation=cv2.INTER_AREA).astype(np.float32)
+                                hist = self._liveness_variation[key]
+                                variation = float(np.mean(np.abs(tiny - hist[-1]))) if hist else 0.0
+                                hist.append(tiny)
+                                del hist[:-3]
+                                if len(hist) >= 3 and max(float(np.mean(np.abs(hist[i] - hist[i-1]))) for i in (1,2)) < config.LIVENESS_MICROVARIATION_THRESHOLD:
+                                    live_ok = False
+                        if not live_ok and ahora - self._liveness_started_at >= config.LIVENESS_TIMEOUT_SECONDS:
+                            self.access_card_state = {"status":"DENEGADO", "name":est.nombre, "matricula":est.matricula, "carrera":"Posible suplantación (foto/pantalla)", "distancia":match.distancia, "confianza":match.confianza_pct, "timer":ahora, "tiempo_acceso":t_acceso, "condicion_luz":condicion_luz}
+                            if ahora - self.db_cooldown.get("LIVENESS:"+key, 0.0) >= config.ACCESS_LOG_COOLDOWN_SECONDS:
+                                self.db_cooldown["LIVENESS:"+key] = ahora
+                                self.db.log_acceso(estudiante_id=est.id, matricula=est.matricula, nombre=est.nombre+" — Posible suplantación (foto/pantalla)", distancia=match.distancia, estado="DENEGADO", tiempo_acceso_segundos=t_acceso, tipo_usuario="estudiante", condicion_luz=condicion_luz)
+                                self.db.log_auditoria(self.current_user.username if self.current_user else "SISTEMA", "LIVENESS_DENEGADA", "ACCESO", f"{est.matricula}: Posible suplantación (foto/pantalla)", "DENEGADO")
+                                self.conteo_denegados += 1
+                                self.lbl_count_den.config(text=str(self.conteo_denegados))
+                            self._cache_acceso.append({"box":box,"nombre":est.nombre,"matricula":est.matricula,"distancia":match.distancia,"confianza":match.confianza_pct,"auth":False,"liveness":False})
+                            continue
+                    if live_ok:
+                        self.access_card_state = {
                         "status": "AUTORIZADO", "name": est.nombre,
                         "matricula": est.matricula, "carrera": est.carrera or "Sin Carrera",
                         "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora,
@@ -1280,8 +1416,11 @@ class GuardApp:
                     }
                     self._cache_acceso.append({
                         "box": box, "nombre": est.nombre, "matricula": est.matricula,
-                        "distancia": match.distancia, "confianza": match.confianza_pct, "auth": True
+                        "distancia": match.distancia, "confianza": match.confianza_pct, "auth": live_ok, "liveness": not live_ok
                     })
+                    if not live_ok:
+                        self.access_card_state = {"status":"LIVENESS", "name":est.nombre, "matricula":est.matricula, "carrera":"Verificando vitalidad: parpadee", "distancia":match.distancia, "confianza":match.confianza_pct, "timer":ahora}
+                        continue
                     last_log = self.db_cooldown.get(est.matricula, 0.0)
                     if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
                         self.db_cooldown[est.matricula] = ahora
@@ -1314,7 +1453,7 @@ class GuardApp:
                             self.db_cooldown["UNKNOWN"] = ahora
                             self.db.log_acceso(
                                 estudiante_id=None, matricula=None,
-                                nombre="Desconocido", distancia=match.distancia, estado="DENEGADO",
+                                nombre=config.NOMBRE_NO_REGISTRADO, distancia=match.distancia, estado="DENEGADO",
                                 tiempo_acceso_segundos=t_acceso_den,
                                 tipo_usuario="visitante",
                                 condicion_luz=condicion_luz
@@ -1324,6 +1463,13 @@ class GuardApp:
         except queue.Empty:
             pass  # sin resultados nuevos, reutilizar caché
 
+        if not any(d.get("auth") or d.get("liveness") for d in self._cache_acceso):
+            if self._liveness_face_key:
+                det = self._liveness_by_person.get(self._liveness_face_key)
+                if det: det.reset()
+            self._liveness_face_key = None
+            self._liveness_started_at = None
+
         # Dibujar siempre las cajas en caché sobre el cuadro actual (video fluido entre detecciones)
         for det in self._cache_acceso:
             try:
@@ -1331,6 +1477,10 @@ class GuardApp:
                     frame=frame, box=det["box"], nombre=det["nombre"], matricula=det["matricula"],
                     distancia=det["distancia"], confianza=det["confianza"], es_autorizado=det["auth"]
                 )
+                if det.get("liveness"):
+                    top, right, bottom, left = det["box"]
+                    cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 255), 2)
+                    cv2.putText(frame, "Verificando vitalidad: parpadee", (left, max(25, top-10)), cv2.FONT_HERSHEY_SIMPLEX, .55, (0,255,255), 2)
             except Exception as e:
                 print(f"[!] Error al dibujar recuadro facial: {e}")
 
@@ -1341,7 +1491,19 @@ class GuardApp:
         estado = self.access_card_state["status"]
         tiempo_transcurrido = ahora - self.access_card_state["timer"]
 
-        if estado == "AUTORIZADO" and tiempo_transcurrido <= config.VISUAL_STATUS_PERSISTENCE_SECONDS:
+        if estado == "LIVENESS":
+            bg_card = "#78350F"
+            self.card_frame.config(bg=bg_card)
+            if hasattr(self, "info_grid"):
+                self.info_grid.config(bg=bg_card)
+            self.lbl_card_icon.config(text="👁️", fg="#FDE047", bg=bg_card)
+            self.lbl_card_title.config(text="VERIFICANDO VITALIDAD", fg="#FDE047", bg=bg_card)
+            self.lbl_card_subtitle.config(text="Verificando vitalidad: parpadee", fg="#FEF3C7", bg=bg_card)
+            self.lbl_card_name.config(text=f"Persona: {self.access_card_state.get('name','---')}", fg="#ffffff", bg=bg_card)
+            self.lbl_card_mat.config(text=f"Matrícula: {self.access_card_state.get('matricula','---')}", fg="#ffffff", bg=bg_card)
+            self.lbl_card_car.config(text="", fg="#ffffff", bg=bg_card)
+            self.lbl_card_metric.config(text="", fg="#FDE047", bg=bg_card)
+        elif estado == "AUTORIZADO" and tiempo_transcurrido <= config.VISUAL_STATUS_PERSISTENCE_SECONDS:
             bg_card = "#064E3B"
             self.card_frame.config(bg=bg_card)
             if hasattr(self, "sep_card"):
@@ -1374,9 +1536,10 @@ class GuardApp:
                 self.info_grid.config(bg=bg_card)
             self.lbl_card_icon.config(text="⛔", fg="#F87171", bg=bg_card)
             self.lbl_card_title.config(text="ACCESO DENEGADO", fg="#F87171", bg=bg_card)
-            self.lbl_card_subtitle.config(text="Sujeto NO identificado en padrón institucional", fg="#ffffff", bg=bg_card)
-            self.lbl_card_name.config(text="Persona: Desconocida", fg="#ffffff", bg=bg_card)
-            self.lbl_card_mat.config(text="Identificador: Sin registro", fg=self.COLOR_TEXT_MUTED, bg=bg_card)
+            spoof = "suplantación" in str(self.access_card_state.get("carrera", "")).lower()
+            self.lbl_card_subtitle.config(text="Posible suplantación (foto/pantalla)" if spoof else "Sujeto NO identificado en padrón institucional", fg="#ffffff", bg=bg_card)
+            self.lbl_card_name.config(text=f"Persona: {self.access_card_state.get('name','Desconocida')}" if spoof else "Persona: Desconocida", fg="#ffffff", bg=bg_card)
+            self.lbl_card_mat.config(text=f"Matrícula: {self.access_card_state.get('matricula','---')}" if spoof else "Identificador: Sin registro", fg=self.COLOR_TEXT_MUTED, bg=bg_card)
             self.lbl_card_car.config(text="Acceso Restringido", fg="#EF4444", bg=bg_card)
             t_ms = self.access_card_state.get("tiempo_acceso", 0.0) * 1000
             luz_str = self.access_card_state.get("condicion_luz", "Iluminación óptima")
@@ -1413,7 +1576,18 @@ class GuardApp:
                 if len(boxes) == 1 else []
             )
 
-        if self._cache_n_rostros_reg == 1 and self._cache_landmarks:
+            # En enrolamiento se exige un parpadeo en cámara en vivo antes de
+            # permitir extraer/guardar la plantilla. La identidad observada se
+            # mantiene ligada al vector capturado para evitar transferir la
+            # prueba de vida a otra persona.
+            if config.ENABLE_LIVENESS_CHECK and (self._registro_liveness_active or self._registro_liveness_ok):
+                self._actualizar_liveness_registro(rgb_frame, boxes)
+
+        if self._registro_liveness_active:
+            Visualizer.draw_banner(frame_mirror, "Verificando vitalidad: parpadee", color=(0, 220, 255))
+        elif self._registro_liveness_ok:
+            Visualizer.draw_banner(frame_mirror, "Vitalidad verificada | Presione 'Capturar rostro verificado'", color=(46, 204, 113))
+        elif self._cache_n_rostros_reg == 1 and self._cache_landmarks:
             Visualizer.draw_facial_landmarks(frame_mirror, self._cache_landmarks[0])
             Visualizer.draw_banner(frame_mirror, "Rostro Enfocado | Presione 'Escanear Rostro'", color=(46, 204, 113))
         elif self._cache_n_rostros_reg == 0:
@@ -1422,6 +1596,76 @@ class GuardApp:
             Visualizer.draw_banner(frame_mirror, "Multiples personas detectadas", color=(52, 73, 235))
 
         self._mostrar_en_label(frame_mirror, self.video_label_registro)
+
+    def _actualizar_liveness_registro(self, rgb_frame, boxes):
+        """Actualiza la prueba de parpadeo y ata su resultado al rostro observado."""
+        if len(boxes) != 1 or not self._cache_landmarks:
+            self._registro_liveness_detector.reset()
+            self._registro_liveness_encoding = None
+            if self._registro_liveness_ok:
+                self._invalidar_captura_registro("El rostro desapareció. Escanee de nuevo y repita la prueba de vitalidad.")
+            elif self._registro_liveness_active and time.time() - (self._registro_liveness_started_at or time.time()) >= config.LIVENESS_TIMEOUT_SECONDS:
+                self._registro_liveness_active = False
+                self._auditar_fallo_liveness_registro("Tiempo agotado sin mantener un rostro frente al sensor")
+                self.lbl_scan_result.config(
+                    text="❌ Se agotó el tiempo sin prueba de vida. Posible fotografía/pantalla; vuelva a intentarlo.",
+                    fg="#FCA5A5", bg="#450A0A"
+                )
+                self.btn_escanear.config(text="🔄  Reintentar prueba de vitalidad", state=tk.NORMAL)
+            return
+
+        encodings = self.encoder.extract_encodings(rgb_frame, boxes)
+        if not encodings:
+            return
+        current = encodings[0]
+        if self._registro_liveness_encoding is None:
+            self._registro_liveness_encoding = current
+        else:
+            delta = float(np.linalg.norm(self._registro_liveness_encoding - current))
+            if delta > config.FACE_DISTANCE_THRESHOLD:
+                self._registro_liveness_detector.reset()
+                self._registro_liveness_encoding = current
+                self._registro_liveness_started_at = time.time()
+                if self._registro_liveness_ok:
+                    self._invalidar_captura_registro("Cambió la persona frente a la cámara. Repita la prueba de vitalidad.")
+
+        if self._registro_liveness_active:
+            live, _ear, _blinks = self._registro_liveness_detector.update(self._cache_landmarks[0])
+            if live:
+                self._registro_liveness_active = False
+                self._registro_liveness_ok = True
+                self.lbl_scan_result.config(
+                    text="✅ Vitalidad verificada. Presione 'Capturar rostro verificado' para continuar.",
+                    fg="#34D399", bg="#064E3B"
+                )
+                self.btn_escanear.config(text="📸  Capturar rostro verificado", state=tk.NORMAL)
+            elif time.time() - (self._registro_liveness_started_at or time.time()) >= config.LIVENESS_TIMEOUT_SECONDS:
+                self._registro_liveness_active = False
+                self._registro_liveness_ok = False
+                self._registro_liveness_detector.reset()
+                self._registro_liveness_encoding = None
+                self._auditar_fallo_liveness_registro("Posible suplantación (foto/pantalla): no se detectó el parpadeo requerido")
+                self.lbl_scan_result.config(
+                    text="❌ No se detectó el parpadeo. Posible fotografía/pantalla; vuelva a escanear e intente de nuevo.",
+                    fg="#FCA5A5", bg="#450A0A"
+                )
+                self.btn_escanear.config(text="🔄  Reintentar prueba de vitalidad", state=tk.NORMAL)
+
+    def _invalidar_captura_registro(self, mensaje):
+        self.nuevo_vector_candidato = None
+        self._registro_liveness_ok = False
+        self._registro_liveness_detector.reset()
+        self._registro_liveness_encoding = None
+        self.btn_guardar.config(state=tk.DISABLED)
+        self.btn_escanear.config(text="📸  Escanear Rostro del Candidato", state=tk.NORMAL)
+        self.lbl_scan_result.config(text=mensaje, fg="#FCA5A5", bg="#450A0A")
+
+    def _auditar_fallo_liveness_registro(self, detalle):
+        try:
+            usuario = self.current_user.username if self.current_user else "SISTEMA"
+            self.db.log_auditoria(usuario, "LIVENESS_ENROLAMIENTO_DENEGADO", "REGISTRO", detalle, "DENEGADO")
+        except Exception as exc:
+            print(f"[!] No se pudo registrar el intento de vitalidad fallido: {exc}")
 
     def _mostrar_en_label(self, frame, label_widget):
         h, w, _ = frame.shape
@@ -1603,8 +1847,33 @@ class GuardApp:
             bg=self.COLOR_CARD
         )
 
+    def _actualizar_campo_otro_motivo(self, _event=None):
+        """Muestra la especificación obligatoria cuando se elige el motivo Otro."""
+        if self.ent_asunto_inv.get() == "Otro (Especifique)":
+            self.frm_otro_motivo.pack(fill=tk.X, before=self.ent_empresa_inv, pady=(0, 4))
+            self.ent_otro_motivo.focus_set()
+        else:
+            self.frm_otro_motivo.pack_forget()
+            self.ent_otro_motivo.delete(0, tk.END)
+
     def _accion_escanear_rostro(self):
         """Escanea el rostro en vivo y extrae el template biométrico de 1024 bytes."""
+        if config.ENABLE_LIVENESS_CHECK and not self._registro_liveness_ok:
+            if self._registro_liveness_active:
+                return
+            self.nuevo_vector_candidato = None
+            self.btn_guardar.config(state=tk.DISABLED)
+            self._registro_liveness_detector.reset()
+            self._registro_liveness_encoding = None
+            self._registro_liveness_started_at = time.time()
+            self._registro_liveness_active = True
+            self.lbl_scan_result.config(
+                text="👁️ Verificando vitalidad: parpadee frente a la cámara. No se guardará una fotografía.",
+                fg="#FDE047", bg="#78350F"
+            )
+            self.btn_escanear.config(text="⏳  Verificando vitalidad…", state=tk.DISABLED)
+            return
+
         modo = self.var_tipo_registro.get()
         if modo == "escolar" and not self.datos_escolares_confirmados:
             messagebox.showwarning(
@@ -1616,23 +1885,30 @@ class GuardApp:
         elif modo == "invitado":
             nom = self.ent_nombre_inv.get().strip()
             asu = self.ent_asunto_inv.get().strip()
-            if not nom or not asu:
+            otro = self.ent_otro_motivo.get().strip() if asu == "Otro (Especifique)" else ""
+            if not nom or not asu or (asu == "Otro (Especifique)" and not otro):
                 messagebox.showwarning(
                     "Datos de Invitado Requeridos",
-                    "Debe registrar el Nombre Completo y el Asunto / Motivo de Visita del invitado antes de escanear su rostro."
+                    "Debe registrar el nombre, el motivo de visita y, si eligió 'Otro', especificarlo antes de escanear el rostro."
                 )
                 if not nom:
                     self.ent_nombre_inv.focus_set()
+                elif asu == "Otro (Especifique)" and not otro:
+                    self.ent_otro_motivo.focus_set()
                 else:
                     self.ent_asunto_inv.focus_set()
                 return
 
         if self.cap is None or not self.cap.isOpened():
+            self._registro_liveness_active = False
+            self._registro_liveness_ok = False
             messagebox.showerror("Error de Cámara", "La cámara no está disponible.")
             return
 
         ret, frame = self.cap.read(timeout=2.0)
         if not ret:
+            self._registro_liveness_active = False
+            self._registro_liveness_ok = False
             messagebox.showerror("Error", "No se pudo leer el fotograma de la cámara.")
             return
 
@@ -1641,6 +1917,8 @@ class GuardApp:
 
         boxes = self.encoder.detect_face_locations_scaled(rgb_frame, max(config.DETECTION_WIDTH, 640))
         if len(boxes) == 0:
+            self._registro_liveness_ok = False
+            self._registro_liveness_encoding = None
             self.lbl_scan_result.config(
                 text="❌ No se detectó ningún rostro. Colóquese de frente al centro con buena iluminación.",
                 fg="#FCA5A5",
@@ -1649,6 +1927,8 @@ class GuardApp:
             return
 
         if len(boxes) > 1:
+            self._registro_liveness_ok = False
+            self._registro_liveness_encoding = None
             self.lbl_scan_result.config(
                 text="❌ Múltiples personas en el encuadre. Solo debe colocarse UNA persona a la vez.",
                 fg="#FCA5A5",
@@ -1658,6 +1938,7 @@ class GuardApp:
 
         encodings = self.encoder.extract_encodings(rgb_frame, boxes)
         if not encodings:
+            self._registro_liveness_ok = False
             self.lbl_scan_result.config(
                 text="❌ No se pudo extraer el template biométrico.",
                 fg="#FCA5A5",
@@ -1667,11 +1948,22 @@ class GuardApp:
 
         candidato_vector = encodings[0]
 
+        if config.ENABLE_LIVENESS_CHECK:
+            if not self._registro_liveness_ok or self._registro_liveness_encoding is None:
+                self._invalidar_captura_registro("Debe completar la prueba de vitalidad antes de guardar.")
+                return
+            if float(np.linalg.norm(self._registro_liveness_encoding - candidato_vector)) > config.FACE_DISTANCE_THRESHOLD:
+                self._invalidar_captura_registro("El rostro capturado no coincide con quien realizó el parpadeo. Repita el escaneo.")
+                return
+
         # VALIDACIÓN BIOMÉTRICA INMEDIATA EN BD
         ya_registrado, est_existente, dist = verificar_rostro_previo(candidato_vector, self.db)
 
         if ya_registrado and est_existente:
             self.nuevo_vector_candidato = None
+            self._registro_liveness_ok = False
+            self._registro_liveness_detector.reset()
+            self._registro_liveness_encoding = None
             self.btn_guardar.config(state=tk.DISABLED)
 
             alerta_msg = (
@@ -1692,6 +1984,7 @@ class GuardApp:
 
         # Rostro nuevo y legítimo
         self.nuevo_vector_candidato = candidato_vector
+        self._registro_liveness_active = False
         self.lbl_scan_result.config(
             text="✅ ¡Rostro verificado y vector de 1024 bytes extraído en memoria! Acepte el Aviso de Privacidad y guarde el registro.",
             fg="#34D399",
@@ -1747,6 +2040,11 @@ class GuardApp:
         if self.nuevo_vector_candidato is None:
             messagebox.showerror("Error", "Primero debe escanear y validar un rostro.")
             return
+        if config.ENABLE_LIVENESS_CHECK and not self._registro_liveness_ok:
+            self.nuevo_vector_candidato = None
+            self.btn_guardar.config(state=tk.DISABLED)
+            messagebox.showerror("Prueba de vida requerida", "Debe completar el parpadeo en cámara y mantener a la misma persona frente al sensor antes de guardar.")
+            return
 
         # Validación obligatoria de Consentimiento Informado (LFPDPPP)
         if hasattr(self, "var_consentimiento") and not self.var_consentimiento.get():
@@ -1775,6 +2073,13 @@ class GuardApp:
             nombre = self.ent_nombre_inv.get().strip()
             asunto = self.ent_asunto_inv.get().strip()
             empresa = self.ent_empresa_inv.get().strip()
+            if asunto == "Otro (Especifique)":
+                especificacion = self.ent_otro_motivo.get().strip()
+                if not especificacion:
+                    messagebox.showerror("Falta especificar", "Escriba cuál es el motivo de visita.")
+                    self.ent_otro_motivo.focus_set()
+                    return
+                asunto = f"Otro: {especificacion}"
 
             if not nombre or not asunto:
                 messagebox.showerror("Campos Incompletos", "El nombre completo y el asunto son obligatorios para invitados.")
@@ -1813,6 +2118,10 @@ class GuardApp:
             )
 
             self.nuevo_vector_candidato = None
+            self._registro_liveness_active = False
+            self._registro_liveness_ok = False
+            self._registro_liveness_detector.reset()
+            self._registro_liveness_encoding = None
             self._recargar_alumnos()
 
             self.lbl_scan_result.config(
@@ -1844,6 +2153,11 @@ class GuardApp:
     def _limpiar_formulario_registro(self):
         """Limpia y resetea el formulario por completo para permitir registros consecutivos sin bloqueos."""
         self.nuevo_vector_candidato = None
+        self._registro_liveness_active = False
+        self._registro_liveness_ok = False
+        self._registro_liveness_encoding = None
+        self._registro_liveness_started_at = None
+        self._registro_liveness_detector.reset()
         self.datos_escolares_confirmados = False
         if hasattr(self, "var_consentimiento"):
             self.var_consentimiento.set(False)
@@ -1870,7 +2184,11 @@ class GuardApp:
         if hasattr(self, "ent_nombre_inv"):
             self.ent_nombre_inv.delete(0, tk.END)
         if hasattr(self, "ent_asunto_inv"):
-            self.ent_asunto_inv.delete(0, tk.END)
+            self.ent_asunto_inv.set("Invitado")
+        if hasattr(self, "ent_otro_motivo"):
+            self.ent_otro_motivo.delete(0, tk.END)
+        if hasattr(self, "frm_otro_motivo"):
+            self.frm_otro_motivo.pack_forget()
         if hasattr(self, "ent_empresa_inv"):
             self.ent_empresa_inv.delete(0, tk.END)
 
@@ -1887,6 +2205,8 @@ class GuardApp:
             self.step3_box.config(fg=self.COLOR_TEXT_MUTED)
         if hasattr(self, "btn_guardar"):
             self.btn_guardar.config(state=tk.DISABLED)
+        if hasattr(self, "btn_escanear"):
+            self.btn_escanear.config(text="📸  Escanear Rostro del Candidato", state=tk.NORMAL)
         if hasattr(self, "btn_otro_registro"):
             self.btn_otro_registro.pack_forget()
 
@@ -2186,6 +2506,10 @@ class GuardApp:
         )
         btn_crear_usr.pack(side=tk.RIGHT, padx=5)
 
+        tk.Button(toolbar, text="👥  Administrar usuarios", font=("Helvetica", 10, "bold"),
+                  bg="#D97706", fg="#ffffff", relief=tk.FLAT, padx=14, pady=6,
+                  cursor="hand2", command=self._administrar_usuarios).pack(side=tk.RIGHT, padx=5)
+
         btn_refresh = tk.Button(toolbar, text="🔄  Actualizar", font=("Helvetica", 10, "bold"), bg=self.COLOR_PANEL, fg="#ffffff", relief=tk.FLAT, padx=14, pady=6, cursor="hand2", command=self._cargar_auditoria)
         btn_refresh.pack(side=tk.RIGHT, padx=5)
 
@@ -2206,6 +2530,97 @@ class GuardApp:
         logs = self.db.obtener_bitacora_auditoria(limit=200)
         for log in logs:
             self.tree_auditoria.insert("", tk.END, values=(log.id, log.usuario, log.operacion, log.entidad, log.detalles, log.resultado, log.timestamp))
+
+    def _administrar_usuarios(self):
+        """Lista, edita y elimina cuentas con una reautenticación administrativa."""
+        win = tk.Toplevel(self.root)
+        win.title("Administrar usuarios")
+        win.geometry("900x560")
+        win.minsize(760, 460)
+        win.configure(bg=self.COLOR_BG)
+        win.transient(self.root)
+        header = tk.Frame(win, bg=self.COLOR_PANEL, padx=22, pady=18)
+        header.pack(fill=tk.X, padx=16, pady=(16, 8))
+        tk.Label(header, text="Administración de usuarios", font=("Helvetica", 16, "bold"),
+                 fg=self.COLOR_GOLD_ITSX, bg=self.COLOR_PANEL).pack(anchor=tk.W)
+        tk.Label(header, text="Consulta y gestiona las cuentas y roles del sistema.",
+                 font=("Helvetica", 10), fg=self.COLOR_TEXT_MUTED, bg=self.COLOR_PANEL).pack(anchor=tk.W, pady=(4, 0))
+        wrap = tk.Frame(win, bg=self.COLOR_PANEL, padx=16, pady=14)
+        wrap.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 16))
+        cols = ("username", "nombre", "rol", "estado")
+        tree = ttk.Treeview(wrap, columns=cols, show="headings", height=14)
+        for col, label, width in (("username", "Usuario", 170), ("nombre", "Nombre completo", 360), ("rol", "Rol", 150), ("estado", "Estado", 120)):
+            tree.heading(col, text=label)
+            tree.column(col, width=width, anchor=tk.W if col in ("username", "nombre") else tk.CENTER,
+                        stretch=col == "nombre")
+
+        def cargar():
+            tree.delete(*tree.get_children())
+            for usr in self.db.obtener_usuarios():
+                tree.insert("", tk.END, values=(usr.username, usr.nombre_completo, usr.rol, "Activo" if usr.activo else "Inactivo"))
+
+        def usuario_seleccionado():
+            sel = tree.selection()
+            return tree.item(sel[0], "values") if sel else None
+
+        def editar():
+            row = usuario_seleccionado()
+            if not row:
+                messagebox.showinfo("Seleccionar usuario", "Seleccione una cuenta para editar.", parent=win)
+                return
+            usr = next((u for u in self.db.obtener_usuarios() if u.username == row[0]), None)
+            if not usr:
+                cargar()
+                return
+            form = EditarUsuarioDialog(win, usr)
+            win.wait_window(form)
+            if not form.confirmado:
+                return
+            autorizado, admin_user, admin_pass = ConfirmAdminDialog.solicitar(
+                win, self.db, f"Editar usuario {usr.username}",
+                f"Cuenta: {form.datos['username']}\nNombre: {form.datos['nombre']}\nRol: {form.datos['rol']}"
+            )
+            if not autorizado:
+                return
+            ok, msg = self.db.actualizar_usuario_admin(usr.username, form.datos["username"], form.datos["nombre"],
+                                                       form.datos["rol"], form.datos["password"], admin_user, admin_pass)
+            if ok and self.current_user and self.current_user.username.casefold() == usr.username.casefold():
+                self.current_user.username = form.datos["username"]
+                self.current_user.nombre_completo = form.datos["nombre"]
+                self.current_user.rol = form.datos["rol"]
+            (messagebox.showinfo if ok else messagebox.showerror)("Administrar usuarios", msg, parent=win)
+            if ok:
+                cargar()
+                self._cargar_auditoria()
+
+        def eliminar():
+            row = usuario_seleccionado()
+            if not row:
+                messagebox.showinfo("Seleccionar usuario", "Seleccione una cuenta para eliminar.", parent=win)
+                return
+            if not messagebox.askyesno("Confirmar eliminación", f"¿Eliminar el usuario '{row[0]}'?", parent=win):
+                return
+            autorizado, admin_user, admin_pass = ConfirmAdminDialog.solicitar(
+                win, self.db, f"Eliminar usuario {row[0]}", f"Se eliminará la cuenta de {row[1]}."
+            )
+            if not autorizado:
+                return
+            ok, msg = self.db.eliminar_usuario_admin(row[0], admin_user, admin_pass,
+                                                     self.current_user.username if self.current_user else None)
+            (messagebox.showinfo if ok else messagebox.showerror)("Administrar usuarios", msg, parent=win)
+            if ok:
+                cargar()
+                self._cargar_auditoria()
+
+        buttons = tk.Frame(wrap, bg=self.COLOR_PANEL)
+        buttons.pack(fill=tk.X, pady=(10, 0))
+        tk.Button(buttons, text="Editar seleccionado", command=editar, bg=self.COLOR_GOLD_ITSX, fg="#0B1120" if self.tema == "oscuro" else "#FFFFFF", relief=tk.FLAT, padx=16, pady=9, cursor="hand2").pack(side=tk.LEFT)
+        tk.Button(buttons, text="Eliminar seleccionado", command=eliminar, bg=self.COLOR_RED, fg="white", relief=tk.FLAT, padx=16, pady=9, cursor="hand2").pack(side=tk.LEFT, padx=8)
+        tk.Button(buttons, text="Actualizar lista", command=cargar, bg=self.COLOR_CARD, fg=self.COLOR_TEXT, relief=tk.FLAT, padx=16, pady=9, cursor="hand2").pack(side=tk.RIGHT)
+        # Empaquetar la tabla después de la barra de acciones reserva siempre
+        # espacio visible para los botones en la parte inferior del diálogo.
+        tree.pack(fill=tk.BOTH, expand=True)
+        cargar()
 
     # -------------------------------------------------------------------------
     def _abrir_crear_usuario(self):
@@ -2301,63 +2716,74 @@ class GuardApp:
         filtro_txt = getattr(self, "ent_buscar_acceso", None)
         txt_query = filtro_txt.get().strip().lower() if filtro_txt else ""
 
-        # --- VALIDACIONES DE FECHA (Samantha: Bloquear rangos invertidos o formatos inválidos) ---
-        import re
-        patron_fecha = r"^\d{4}-\d{2}-\d{2}$"
-        if f_ini and not re.match(patron_fecha, f_ini):
+        # --- VALIDACIONES DE CAMPOS VACÍOS PARCIALES Y FORMATOS (Samantha: Regla explícita) ---
+        # 1. Validación de fechas
+        if f_ini and not f_fin:
             if hasattr(self, "lbl_aviso_filtro_accesos"):
                 self.lbl_aviso_filtro_accesos.config(
-                    text="⚠️ Formato de Fecha Inicial incorrecto (use AAAA-MM-DD, ej. 2026-10-15)",
+                    text="⚠️ Rango incompleto: Ha especificado Fecha Inicial pero falta Fecha Final.",
                     fg=self.COLOR_RED
                 )
             return
 
-        if f_fin and not re.match(patron_fecha, f_fin):
+        if f_fin and not f_ini:
             if hasattr(self, "lbl_aviso_filtro_accesos"):
                 self.lbl_aviso_filtro_accesos.config(
-                    text="⚠️ Formato de Fecha Final incorrecto (use AAAA-MM-DD, ej. 2026-10-20)",
+                    text="⚠️ Rango incompleto: Ha especificado Fecha Final pero falta Fecha Inicial.",
                     fg=self.COLOR_RED
                 )
             return
 
-        if f_ini and f_fin and f_ini > f_fin:
+        # 2. Validación de horas
+        if h_ini and not h_fin:
             if hasattr(self, "lbl_aviso_filtro_accesos"):
                 self.lbl_aviso_filtro_accesos.config(
-                    text="⚠️ Rango invertido: La Fecha Inicial no puede ser posterior a la Fecha Final.",
+                    text="⚠️ Rango incompleto: Ha especificado Hora Inicial pero falta Hora Final.",
                     fg=self.COLOR_RED
                 )
             return
 
-        # --- VALIDACIONES DE HORA (Samantha) ---
-        patron_hora = r"^\d{2}:\d{2}$"
-        if h_ini and not re.match(patron_hora, h_ini):
+        if h_fin and not h_ini:
             if hasattr(self, "lbl_aviso_filtro_accesos"):
                 self.lbl_aviso_filtro_accesos.config(
-                    text="⚠️ Formato de Hora Inicial incorrecto (use HH:MM, ej. 08:30)",
+                    text="⚠️ Rango incompleto: Ha especificado Hora Final pero falta Hora Inicial.",
                     fg=self.COLOR_RED
                 )
             return
 
-        if h_fin and not re.match(patron_hora, h_fin):
-            if hasattr(self, "lbl_aviso_filtro_accesos"):
-                self.lbl_aviso_filtro_accesos.config(
-                    text="⚠️ Formato de Hora Final incorrecto (use HH:MM, ej. 18:00)",
-                    fg=self.COLOR_RED
-                )
-            return
-
-        # Si las fechas son idénticas o no se especificaron, validar que hora_ini <= hora_fin
-        if (not f_ini and not f_fin) or (f_ini == f_fin):
-            if h_ini and h_fin and h_ini > h_fin:
+        # 3. Validación real de fechas (rechazar 2026-13-45)
+        date_ini_obj, date_fin_obj = None, None
+        if f_ini and f_fin:
+            ok_rango, msg_rango = validar_rango_fechas(f_ini, f_fin)
+            if not ok_rango:
                 if hasattr(self, "lbl_aviso_filtro_accesos"):
-                    self.lbl_aviso_filtro_accesos.config(
-                        text="⚠️ Rango de horas invertido: La Hora Inicial no puede ser posterior a la Hora Final.",
-                        fg=self.COLOR_RED
-                    )
+                    self.lbl_aviso_filtro_accesos.config(text=f"⚠️ {msg_rango}", fg=self.COLOR_RED)
                 return
+            _, date_ini_obj, _ = validar_fecha(f_ini)
+            _, date_fin_obj, _ = validar_fecha(f_fin)
 
-        # Tokens para búsqueda flexible de nombres (empezando por nombre o por apellido)
-        tokens_query = [t for t in txt_query.split() if t]
+        # 4. Validación real de horas (rechazar 25:99)
+        time_ini_obj, time_fin_obj = None, None
+        if h_ini and h_fin:
+            ok_h_rango, msg_h_rango = validar_rango_horas(h_ini, h_fin)
+            if not ok_h_rango:
+                if hasattr(self, "lbl_aviso_filtro_accesos"):
+                    self.lbl_aviso_filtro_accesos.config(text=f"⚠️ {msg_h_rango}", fg=self.COLOR_RED)
+                return
+            _, time_ini_obj, _ = validar_hora(h_ini)
+            _, time_fin_obj, _ = validar_hora(h_fin)
+
+        # 5. Validación de matrícula si el usuario ingresó un patrón tipo matrícula (Darian)
+        if txt_query:
+            # Si parece un intento de matrícula (inicia con dígitos o INV-)
+            txt_upper = txt_query.strip().upper()
+            if any(c.isdigit() for c in txt_upper) or txt_upper.startswith("INV-") or txt_upper.startswith("DOC-"):
+                # Si contiene caracteres prohibidos evidentes como #, ?, $, advertir antes de consultar
+                valida_mat, msg_mat = validar_matricula_itsx(txt_upper)
+                if not valida_mat and ("caracteres inválidos" in msg_mat or len(txt_upper) > 9):
+                    if hasattr(self, "lbl_aviso_filtro_accesos"):
+                        self.lbl_aviso_filtro_accesos.config(text=f"⚠️ {msg_mat}", fg=self.COLOR_RED)
+                    return
 
         self._accesos_filtrados_actuales = []
 
@@ -2368,25 +2794,35 @@ class GuardApp:
                 continue
 
             ts = str(log.timestamp or "")
-            fecha_log = ts[:10] if len(ts) >= 10 else ""
-            hora_log = ts[11:16] if len(ts) >= 16 else ""
+            fecha_log_str = ts[:10] if len(ts) >= 10 else ""
+            hora_log_str = ts[11:16] if len(ts) >= 16 else ""
 
-            if f_ini and fecha_log and fecha_log < f_ini:
-                continue
-            if f_fin and fecha_log and fecha_log > f_fin:
-                continue
-            if h_ini and hora_log and hora_log < h_ini:
-                continue
-            if h_fin and hora_log and hora_log > h_fin:
-                continue
+            # Comparación con objetos date / time
+            if date_ini_obj and date_fin_obj and fecha_log_str:
+                try:
+                    d_log = datetime.strptime(fecha_log_str, "%Y-%m-%d").date()
+                    if d_log < date_ini_obj or d_log > date_fin_obj:
+                        continue
+                except ValueError:
+                    continue
 
-            mat = (log.matricula or "").lower()
-            nom = (log.nombre or "").lower()
+            if time_ini_obj and time_fin_obj and hora_log_str:
+                try:
+                    t_log = datetime.strptime(hora_log_str, "%H:%M").time()
+                    if t_log < time_ini_obj or t_log > time_fin_obj:
+                        continue
+                except ValueError:
+                    continue
 
-            # Validación de búsqueda: todos los tokens ingresados deben encontrarse en la matrícula o en el nombre
-            if tokens_query:
-                texto_completo = f"{mat} {nom}"
-                if not all(tok in texto_completo for tok in tokens_query):
+            mat = log.matricula or ""
+            nom = log.nombre or config.NOMBRE_NO_REGISTRADO
+            if str(nom).lower() == "desconocido":
+                nom = config.NOMBRE_NO_REGISTRADO
+
+            # Búsqueda flexible de nombre/matrícula independiente del orden y sin acentos (Samantha)
+            if txt_query:
+                texto_registro = f"{mat} {nom}"
+                if not coincide_nombre(txt_query, texto_registro):
                     continue
 
             self._accesos_filtrados_actuales.append(log)
@@ -2398,7 +2834,7 @@ class GuardApp:
                     log.id,
                     log.timestamp,
                     log.matricula or "---",
-                    log.nombre or "No Registrado",
+                    nom,
                     f"{log.distancia:.3f}",
                     "✓ AUTORIZADO" if log.estado == "PERMITIDO" else "✗ DENEGADO"
                 ),
@@ -2446,30 +2882,49 @@ class GuardApp:
         Permite búsqueda tolerante por apellidos o nombres indiferente al orden (Samantha)
         y emite alertas cuando no se encuentre a la persona (Aleida).
         """
-        if not hasattr(self, "tree_estudiantes"):
+        if not self._root_alive() or not hasattr(self, "tree_estudiantes"):
             return
+        self._limpiar_botones_acciones_padron()
         for row in self.tree_estudiantes.get_children():
             self.tree_estudiantes.delete(row)
 
         filtro_txt = getattr(self, "ent_buscar_estudiante", None)
-        txt_query = filtro_txt.get().strip().lower() if filtro_txt else ""
-        tokens_query = [t for t in txt_query.split() if t]
+        txt_query = filtro_txt.get().strip() if filtro_txt else ""
+
+        if txt_query:
+            txt_upper = txt_query.strip().upper()
+            if any(c.isdigit() for c in txt_upper) or txt_upper.startswith("INV-") or txt_upper.startswith("DOC-"):
+                valida_mat, msg_mat = validar_matricula_itsx(txt_upper)
+                if not valida_mat and ("caracteres inválidos" in msg_mat or len(txt_upper) > 9):
+                    if hasattr(self, "lbl_aviso_filtro_estudiantes"):
+                        self.lbl_aviso_filtro_estudiantes.config(text=f"⚠️ {msg_mat}", fg=self.COLOR_RED)
+                    return
 
         encontrados = 0
         for al in getattr(self, "_cache_raw_estudiantes", []):
-            mat = (al.matricula or "").lower()
-            nom = (al.nombre or "").lower()
-            car = (al.carrera or "").lower()
+            mat = al.matricula or ""
+            nom = al.nombre or ""
+            car = al.carrera or ""
             texto_registro = f"{mat} {nom} {car}"
 
-            if tokens_query and not all(tok in texto_registro for tok in tokens_query):
+            if txt_query and not coincide_nombre(txt_query, texto_registro):
                 continue
 
             encontrados += 1
-            self.tree_estudiantes.insert(
+            es_invitado = mat.startswith("INV-") or "invitado" in car.lower()
+            iid = self.tree_estudiantes.insert(
                 "", tk.END,
-                values=(al.id, al.matricula, al.nombre, al.carrera or "N/A", "1024 bytes (cifrado)")
+                values=(al.id, al.matricula, al.nombre, al.carrera or "N/A", "1024 bytes (cifrado)", "")
             )
+            if es_invitado:
+                edit = tk.Button(self.tree_estudiantes, text="Editar", bg="#FACC15", fg="#111827",
+                                 activebackground="#EAB308", relief=tk.FLAT, font=("Helvetica", 8, "bold"),
+                                 command=lambda row=iid: self._accion_invitado_fila(row, editar=True))
+                delete = tk.Button(self.tree_estudiantes, text="Eliminar", bg="#DC2626", fg="#ffffff",
+                                   activebackground="#B91C1C", relief=tk.FLAT, font=("Helvetica", 8, "bold"),
+                                   command=lambda row=iid: self._accion_invitado_fila(row, editar=False))
+                self._padron_action_buttons[iid] = (edit, delete)
+                self.root.after_idle(self._reposicionar_acciones_padron)
 
         if hasattr(self, "lbl_aviso_filtro_estudiantes"):
             if txt_query and encontrados == 0:
@@ -2485,6 +2940,66 @@ class GuardApp:
             else:
                 self.lbl_aviso_filtro_estudiantes.config(text="")
 
+    def _limpiar_botones_acciones_padron(self):
+        for buttons in getattr(self, "_padron_action_buttons", {}).values():
+            for button in buttons:
+                button.destroy()
+        self._padron_action_buttons = {}
+
+    def _reposicionar_acciones_padron(self):
+        tree = getattr(self, "tree_estudiantes", None)
+        if tree is None:
+            return
+        for iid, buttons in getattr(self, "_padron_action_buttons", {}).items():
+            try:
+                cell = tree.bbox(iid, "accion")
+            except tk.TclError:
+                cell = ()
+            if not cell:
+                for button in buttons:
+                    button.place_forget()
+                continue
+            x, y, width, height = cell
+            gap = 3
+            button_width = max(1, (width - 3 * gap) // 2)
+            button_height = max(1, height - 4)
+            buttons[0].place(x=x + gap, y=y + 2, width=button_width, height=button_height)
+            buttons[1].place(x=x + 2 * gap + button_width, y=y + 2, width=button_width, height=button_height)
+
+    def _actualizar_scroll_padron(self, first, last):
+        if hasattr(self, "scroll_estudiantes"):
+            self.scroll_estudiantes.set(first, last)
+        try:
+            self.root.after_idle(self._reposicionar_acciones_padron)
+        except tk.TclError:
+            pass
+
+    def _scroll_padron(self, *args):
+        try:
+            self.tree_estudiantes.yview(*args)
+            self.root.after_idle(self._reposicionar_acciones_padron)
+        except tk.TclError:
+            pass
+
+    def _accion_invitado_fila(self, iid, editar):
+        if not self._root_alive() or not hasattr(self, "tree_estudiantes"):
+            return
+        try:
+            if not self.tree_estudiantes.exists(iid):
+                return
+            values = self.tree_estudiantes.item(iid, "values")
+            matricula = str(values[1]) if len(values) > 1 else ""
+            estudiante = next((item for item in self.estudiantes if str(item.matricula) == matricula), None)
+            if not estudiante or not (matricula.startswith("INV-") or "invitado" in (estudiante.carrera or "").lower()):
+                return
+            self.tree_estudiantes.selection_set(iid)
+        except tk.TclError:
+            return
+        if editar:
+            self._editar_alumno_seleccionado()
+        else:
+            self._eliminar_alumno_seleccionado()
+
     def _recargar_alumnos(self):
         self.estudiantes = self.db.get_all_active_estudiantes()
         self.matcher.set_known_students(self.estudiantes)
@@ -2495,9 +3010,11 @@ class GuardApp:
 
     def _editar_alumno_seleccionado(self):
         """Abre el diálogo de edición para el alumno seleccionado en el padrón."""
+        if not self._root_alive():
+            return
         seleccion = self.tree_estudiantes.selection()
         if not seleccion:
-            messagebox.showinfo("Aviso", "Por favor seleccione un estudiante del padrón.")
+            self._mostrar_mensaje_seguro(messagebox.showinfo, "Aviso", "Por favor seleccione un estudiante del padrón.")
             return
 
         item = self.tree_estudiantes.item(seleccion[0])
@@ -2506,13 +3023,19 @@ class GuardApp:
         # Buscar el objeto Estudiante completo
         estudiante = next((e for e in self.estudiantes if str(e.matricula) == matricula), None)
         if not estudiante:
-            messagebox.showerror("Error", "No se encontró el registro del estudiante.")
+            self._mostrar_mensaje_seguro(messagebox.showerror, "Error", "No se encontró el registro del estudiante.")
+            return
+        es_invitado = estudiante.matricula.startswith("INV-") or "invitado" in (estudiante.carrera or "").lower()
+        if not es_invitado:
+            self._mostrar_mensaje_seguro(messagebox.showwarning, "Edición restringida", "En esta sección solo se permite editar perfiles de invitados.")
             return
 
         # Mostrar diálogo de edición
-        dlg = EditEstudianteDialog(self.root, estudiante, CARRERAS_ITSX)
+        dlg = EditEstudianteDialog(self.root, estudiante, CARRERAS_ITSX, es_invitado=True)
         dlg.wait_window()
 
+        if not self._root_alive():
+            return
         if not dlg.confirmado:
             return
 
@@ -2521,10 +3044,14 @@ class GuardApp:
             parent=self.root,
             db=self.db,
             accion_titulo=f"Modificar datos de: {estudiante.nombre}",
-            mensaje_detalles=f"Matrícula: {matricula}\nNombre nuevo: {dlg.nuevo_nombre}\nCarrera: {dlg.nueva_carrera}"
+            mensaje_detalles=f"Matrícula: {matricula}\nNombre nuevo: {dlg.nuevo_nombre}\nCarrera: {dlg.nueva_carrera}",
+            default_user=self.current_user.username if self.current_user else "",
+            allow_operator=True
         )
+        if not self._root_alive():
+            return
         if not autorizado:
-            messagebox.showwarning("Cancelado", "Operación cancelada. Se requieren credenciales de administrador.")
+            self._mostrar_mensaje_seguro(messagebox.showwarning, "Cancelado", "Operación cancelada. Se requiere revalidar la contraseña de su cuenta de operador o administrador.")
             return
 
         ok, msg = self.db.update_estudiante(
@@ -2535,26 +3062,55 @@ class GuardApp:
             admin_password=admin_pass
         )
         if ok:
-            messagebox.showinfo("Actualizado", msg)
+            self._mostrar_mensaje_seguro(messagebox.showinfo, "Actualizado", msg)
             self._recargar_alumnos()
         else:
-            messagebox.showerror("Error", msg)
+            self._mostrar_mensaje_seguro(messagebox.showerror, "Error", msg)
+
+    def _root_alive(self):
+        try:
+            return bool(self.root.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _mostrar_mensaje_seguro(self, dialogo, titulo, mensaje):
+        """Evita abrir un messagebox Tk cuando la ventana principal ya se cerró."""
+        if not self._root_alive():
+            return
+        try:
+            return dialogo(titulo, mensaje, parent=self.root)
+        except tk.TclError:
+            return
 
     def _eliminar_alumno_seleccionado(self):
         """Elimina el alumno seleccionado del padrón, requiriendo credenciales de administrador."""
+        try:
+            if not self.root.winfo_exists():
+                return
+        except tk.TclError:
+            return
         seleccion = self.tree_estudiantes.selection()
         if not seleccion:
-            messagebox.showinfo("Aviso", "Por favor seleccione un estudiante del padrón.")
+            self._mostrar_mensaje_seguro(messagebox.showinfo, "Aviso", "Por favor seleccione un estudiante del padrón.")
             return
 
         item = self.tree_estudiantes.item(seleccion[0])
         matricula = str(item["values"][1])
         nombre = str(item["values"][2])
+        estudiante = next((e for e in self.estudiantes if str(e.matricula) == matricula), None)
+        if not estudiante or not (estudiante.matricula.startswith("INV-") or "invitado" in (estudiante.carrera or "").lower()):
+            self._mostrar_mensaje_seguro(messagebox.showwarning, "Eliminación restringida", "En esta sección solo se permite eliminar perfiles de invitados.")
+            return
 
-        if not messagebox.askyesno(
-            "Confirmar Baja",
-            f"¿Desea dar de baja a {nombre} ({matricula}) del padrón institucional?\n\nEsta acción requiere credenciales de administrador."
-        ):
+        try:
+            confirmar = messagebox.askyesno(
+                "Confirmar Baja",
+                f"¿Desea dar de baja a {nombre} ({matricula}) del padrón institucional?\n\nConfirme la operación con su contraseña de operador o administrador.",
+                parent=self.root
+            )
+        except tk.TclError:
+            return
+        if not confirmar:
             return
 
         # Exigir credenciales admin antes de eliminar
@@ -2562,18 +3118,22 @@ class GuardApp:
             parent=self.root,
             db=self.db,
             accion_titulo=f"Eliminar alumno: {nombre}",
-            mensaje_detalles=f"Matrícula: {matricula}\nEsta acción eliminará permanentemente el vector biométrico y el registro."
+            mensaje_detalles=f"Matrícula: {matricula}\nEsta acción eliminará permanentemente el vector biométrico y el registro.",
+            default_user=self.current_user.username if self.current_user else "",
+            allow_operator=True
         )
+        if not self._root_alive():
+            return
         if not autorizado:
-            messagebox.showwarning("Cancelado", "Operación cancelada.")
+            self._mostrar_mensaje_seguro(messagebox.showwarning, "Cancelado", "Operación cancelada. Se requiere revalidar la contraseña de su cuenta de operador o administrador.")
             return
 
-        ok = self.db.delete_estudiante(matricula, admin_username=admin_user, admin_password=admin_pass)
+        ok, msg = self.db.delete_invitado(matricula, admin_username=admin_user, admin_password=admin_pass)
         if ok:
-            messagebox.showinfo("Baja Confirmada", f"El alumno {nombre} y su vector fueron eliminados del padrón.")
+            self._mostrar_mensaje_seguro(messagebox.showinfo, "Baja Confirmada", f"El invitado {nombre} y su vector fueron eliminados del padrón.")
             self._recargar_alumnos()
         else:
-            messagebox.showerror("Error", "No se pudo eliminar el registro. Verifique las credenciales de administrador.")
+            self._mostrar_mensaje_seguro(messagebox.showerror, "Error", msg or "No se pudo eliminar el invitado. Verifique las credenciales de su cuenta.")
 
     def _exportar_csv(self):
         filename = filedialog.asksaveasfilename(
@@ -2625,11 +3185,46 @@ class GuardApp:
         if self.cap is not None:
             self.cap.release()
         try:
+            self.db.purgar_invitados_expirados()
+            from datetime import date, timedelta
+            cutoff = (date.today() - timedelta(days=config.LOG_KEEP_DAYS)).isoformat()
+            for day in (d for d in self.db.obtener_fechas_accesos() if d <= cutoff):
+                self._exportar_y_limpiar_dia(day, show_errors=False)
             # Mantenimiento preventivo al cerrar: purga y rotación automática (Guadalupe Velázquez)
-            self.db.rotar_registros_antiguos(dias_retencion=30, max_registros=5000)
-        except Exception:
-            pass
+            self.db.rotar_registros_antiguos()
+        except Exception as e_rot:
+            print(f"[!] Aviso al cerrar: error en mantenimiento de registros: {e_rot}")
         self.root.destroy()
+
+    def _exportar_y_limpiar_dia(self, fecha, show_errors=True):
+        """Genera, verifica y luego purga de forma segura el reporte diario."""
+        try:
+            path = generar_reporte_diario_excel(fecha=fecha)
+            import openpyxl
+            wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            count = max(0, wb.active.max_row - 1)
+            wb.close()
+            deleted = self.db.eliminar_accesos_dia_exportado(fecha, count)
+            return path, deleted
+        except Exception as exc:
+            if show_errors:
+                messagebox.showerror("Error al exportar y limpiar", f"No se borró ningún acceso. {exc}")
+            raise
+
+    def _exportar_limpiar_manual(self):
+        from datetime import date, timedelta
+        candidates = [day for day in self.db.obtener_fechas_accesos()
+                      if day <= (date.today() - timedelta(days=config.LOG_KEEP_DAYS)).isoformat()]
+        try:
+            total = 0
+            files = []
+            for day in candidates:
+                path, deleted = self._exportar_y_limpiar_dia(day)
+                total += deleted
+                files.append(path)
+            messagebox.showinfo("Exportar y limpiar", f"Proceso completado. Accesos eliminados: {total}\nReportes: {len(files)}")
+        except Exception:
+            return
 
 
 def iniciar_gui():

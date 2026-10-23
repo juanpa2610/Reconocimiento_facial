@@ -64,11 +64,14 @@ def consultar_historial_accesos(limit: int = 25):
     table_data = []
     for log in logs:
         estado_label = f"✓ {log.estado}" if log.estado == "PERMITIDO" else f"✗ {log.estado}"
+        nom_txt = log.nombre or config.NOMBRE_NO_REGISTRADO
+        if str(nom_txt).lower() == "desconocido":
+            nom_txt = config.NOMBRE_NO_REGISTRADO
         table_data.append([
             log.id,
             log.timestamp or "N/A",
             log.matricula or "N/A",
-            log.nombre or "Desconocido",
+            nom_txt,
             f"{log.distancia:.4f}",
             estado_label
         ])
@@ -99,12 +102,15 @@ def exportar_accesos_csv(filename: Optional[str] = None, logs_data: Optional[lis
             "Tipo_Usuario", "Condicion_Iluminacion"
         ])
         for log in logs:
+            nom_csv = log.nombre or config.NOMBRE_NO_REGISTRADO
+            if str(nom_csv).lower() == "desconocido":
+                nom_csv = config.NOMBRE_NO_REGISTRADO
             writer.writerow([
                 log.id,
                 log.timestamp,
                 log.estudiante_id or "",
                 log.matricula or "---",
-                log.nombre or "Desconocido",
+                nom_csv,
                 f"{getattr(log, 'tiempo_acceso_segundos', 0.0):.4f}",
                 f"{log.distancia:.4f}",
                 log.estado,
@@ -170,11 +176,14 @@ def exportar_accesos_excel(filename: Optional[str] = None, logs_data: Optional[L
     for row_idx, log in enumerate(logs, start=2):
         dist_val = getattr(log, 'distancia', 0.0)
         t_val = getattr(log, 'tiempo_acceso_segundos', 0.0)
+        nom_val = str(getattr(log, 'nombre', '') or config.NOMBRE_NO_REGISTRADO)
+        if nom_val.lower() == "desconocido":
+            nom_val = config.NOMBRE_NO_REGISTRADO
         row_values = [
             getattr(log, 'id', row_idx - 1),
             str(getattr(log, 'timestamp', '')),
             str(getattr(log, 'matricula', '') or '---'),
-            str(getattr(log, 'nombre', '') or 'Desconocido'),
+            nom_val,
             round(float(dist_val), 4) if dist_val is not None else 0.0,
             str(getattr(log, 'estado', '')),
             round(float(t_val), 4) if t_val is not None else 0.0,
@@ -214,6 +223,7 @@ def generar_reporte_diario_excel(fecha: Optional[str] = None, output_dir: Option
     Automatización de reporte diario en Excel (Guadalupe Velázquez):
     Genera un archivo Excel oficial con formato institucional y nombre estandarizado:
     itsx_accesos_YYYY-MM-DD.xlsx conteniendo los accesos correspondientes a dicha fecha.
+    Soporta carpeta configurable REPORTS_DIR con compatibilidad para 'Archivos exel'.
     """
     import os
     if not fecha:
@@ -223,11 +233,19 @@ def generar_reporte_diario_excel(fecha: Optional[str] = None, output_dir: Option
 
     if not output_dir:
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        archivos_dir = os.path.join(base_dir, "Archivos exel")
+        reports_name = getattr(config, "REPORTS_DIR", "reportes")
+        archivos_dir = os.path.join(base_dir, reports_name)
+
+        # Compatibilidad / migración: si existe 'Archivos exel' y reports_dir es el default 'reportes', usarla o respetarla
+        legacy_dir = os.path.join(base_dir, "Archivos exel")
+        if not os.path.exists(archivos_dir) and os.path.exists(legacy_dir):
+            archivos_dir = legacy_dir
+
         if not os.path.exists(archivos_dir):
             try:
                 os.makedirs(archivos_dir, exist_ok=True)
-            except Exception:
+            except Exception as e:
+                print(f"[!] Aviso: No se pudo crear directorio {archivos_dir}: {e}")
                 archivos_dir = base_dir
         output_dir = archivos_dir
 
@@ -235,11 +253,18 @@ def generar_reporte_diario_excel(fecha: Optional[str] = None, output_dir: Option
 
     db = Database()
     db.init_db()
-    todos_logs = db.get_recent_accesos(limit=10000)
+    todos_logs = db.get_recent_accesos(limit=1000000)
     # Filtrar solo los registros que corresponden al día especificado (YYYY-MM-DD)
     logs_dia = [log for log in todos_logs if str(log.timestamp or "").startswith(fecha_str)]
 
     exportar_accesos_excel(filename=filename, logs_data=logs_dia)
+    import openpyxl
+    wb = openpyxl.load_workbook(filename, read_only=True, data_only=True)
+    ws = wb.active
+    excel_count = max(0, ws.max_row - 1)
+    wb.close()
+    if excel_count != len(logs_dia):
+        raise RuntimeError(f"Excel incompleto para {fecha_str}: esperados {len(logs_dia)} accesos, contiene {excel_count}")
     return filename
 
 

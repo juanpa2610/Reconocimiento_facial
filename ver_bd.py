@@ -95,8 +95,11 @@ def ver_accesos(limite=20):
         est = "✓ " + r["estado"] if r["estado"] in ("PERMITIDO", "AUTORIZADO") else "✗ " + r["estado"]
         dist = f"{r['distancia']:.4f}" if r["distancia"] is not None else "---"
         t = f"{r['tiempo_acceso_segundos']:.3f} s" if r["tiempo_acceso_segundos"] else "---"
+        nom_reg = r["nombre"] or getattr(config, "NOMBRE_NO_REGISTRADO", "No Registrado")
+        if str(nom_reg).lower() == "desconocido":
+            nom_reg = getattr(config, "NOMBRE_NO_REGISTRADO", "No Registrado")
         data.append([
-            r["id"], r["timestamp"], r["matricula"] or "---", r["nombre"] or "Desconocido",
+            r["id"], r["timestamp"], r["matricula"] or "---", nom_reg,
             dist, est, t, r["tipo_usuario"], r["condicion_luz"]
         ])
     headers = ["ID", "Fecha / Hora", "Matrícula", "Nombre", "Dist. L2", "Estado", "Latencia", "Tipo", "Iluminación"]

@@ -49,6 +49,15 @@ VECTOR_DIMENSION = 128
 # Un valor de 0.50 es el estándar estricto de alta seguridad para evitar falsos positivos y falsas asociaciones.
 FACE_DISTANCE_THRESHOLD = float(os.getenv("FACE_DISTANCE_THRESHOLD", "0.50"))
 
+# Etiqueta unificada para sujetos no identificados / no registrados (Sprint 3 Josué)
+NOMBRE_NO_REGISTRADO = os.getenv("NOMBRE_NO_REGISTRADO", "No Registrado")
+
+# Carpeta y retención de reportes y bitácoras (Sprint 3 Guadalupe Velázquez)
+REPORTS_DIR = os.getenv("REPORTS_DIR", "reportes")
+LOG_RETENTION_DAYS = int(os.getenv("LOG_RETENTION_DAYS", "30"))
+LOG_MAX_ROWS = int(os.getenv("LOG_MAX_ROWS", "5000"))
+LOG_KEEP_DAYS = int(os.getenv("LOG_KEEP_DAYS", "7"))
+
 # Fuente de video: int si es cámara local (ej. 0), string si es URL RTSP / archivo
 _raw_source = os.getenv("VIDEO_SOURCE", "0")
 VIDEO_SOURCE = int(_raw_source) if _raw_source.isdigit() else _raw_source
@@ -88,7 +97,10 @@ CAMERA_RECONNECT_SECONDS = float(os.getenv("CAMERA_RECONNECT_SECONDS", "10.0"))
 # Anti-suplantación / Liveness (Detección de parpadeo con Eye Aspect Ratio - EAR)
 # -----------------------------------------------------------------------------
 # Habilita o deshabilita la verificación activa de parpadeo humano para prevenir fotos estáticas
-ENABLE_LIVENESS_CHECK = os.getenv("ENABLE_LIVENESS_CHECK", "false").lower() in ("true", "1", "yes")
+ENABLE_LIVENESS_CHECK = os.getenv("ENABLE_LIVENESS_CHECK", "true").lower() in ("true", "1", "yes")
+LIVENESS_TIMEOUT_SECONDS = float(os.getenv("LIVENESS_TIMEOUT_SECONDS", "5.0"))
+LIVENESS_MICROVARIATION_THRESHOLD = float(os.getenv("LIVENESS_MICROVARIATION_THRESHOLD", "0.35"))
+GUEST_RETENTION_HOURS = int(os.getenv("GUEST_RETENTION_HOURS", "24"))
 
 # Umbral del Eye Aspect Ratio (EAR): por debajo de este valor se considera ojo cerrado
 EAR_THRESHOLD = float(os.getenv("EAR_THRESHOLD", "0.22"))
