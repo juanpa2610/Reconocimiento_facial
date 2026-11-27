@@ -175,6 +175,10 @@ class GuardApp:
         self.is_camera_running = False
         self._camera_started = False
 
+        # Estado de alerta manual: se activa con la tecla A durante 3 segundos.
+        self._alerta_manual_hasta = 0.0
+        self._alerta_mensaje = "ALERTA MANUAL ACTIVADA"
+
         # Cola para trasladar el procesamiento biométrico fuera del hilo de Tk
         self._vision_queue: queue.Queue = queue.Queue(maxsize=2)
         self._vision_result_queue: queue.Queue = queue.Queue(maxsize=4)
@@ -242,6 +246,11 @@ class GuardApp:
 
         # Evento de cierre
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # Capturar la tecla A desde cualquier widget de la GUI.
+        # La alerta solo se activa en la pestaña de Control de Acceso.
+        self.root.bind_all("<KeyPress>", self._tecla_alerta_manual, add="+")
+
         self.root.after(60 * 60 * 1000, self._purgar_invitados_periodicamente)
 
     def _purgar_invitados_periodicamente(self):
@@ -1292,6 +1301,59 @@ class GuardApp:
         self._vision_thread = threading.Thread(target=_worker, name="VisionWorker", daemon=True)
         self._vision_thread.start()
 
+    def _tecla_alerta_manual(self, event=None):
+        """Activa una alerta visual manual durante 3 segundos al presionar A."""
+        if not event or str(getattr(event, "keysym", "")).lower() != "a":
+            return
+
+        try:
+            if self.notebook.index(self.notebook.select()) != 0:
+                return
+        except (tk.TclError, AttributeError):
+            return
+
+        self._activar_torreta_virtual("ALERTA MANUAL ACTIVADA")
+        return "break"
+
+    def _activar_torreta_virtual(self, mensaje="ALERTA: ACCESO DENEGADO"):
+        """Activa la señal visual roja de la torreta virtual durante 3 segundos."""
+        self._alerta_manual_hasta = time.time() + 3.0
+        self._alerta_mensaje = mensaje
+
+    def _dibujar_alerta_manual(self, frame):
+        """Superpone una franja y un borde rojos mientras la alerta esté activa."""
+        if time.time() >= self._alerta_manual_hasta:
+            return frame
+
+        alto, ancho = frame.shape[:2]
+        overlay = frame.copy()
+
+        # Franja superior roja semitransparente.
+        cv2.rectangle(overlay, (0, 0), (ancho, min(92, alto)), (0, 0, 210), -1)
+        cv2.addWeighted(overlay, 0.62, frame, 0.38, 0, frame)
+
+        # Borde rojo alrededor del video.
+        grosor = max(3, int(min(ancho, alto) * 0.008))
+        cv2.rectangle(
+            frame,
+            (grosor, grosor),
+            (max(grosor, ancho - grosor), max(grosor, alto - grosor)),
+            (0, 0, 255),
+            grosor
+        )
+
+        cv2.putText(
+            frame,
+            self._alerta_mensaje,
+            (18, min(58, max(28, alto - 10))),
+            cv2.FONT_HERSHEY_DUPLEX,
+            0.9,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA
+        )
+        return frame
+
     def _loop_camara(self):
         if not getattr(self, "is_camera_running", False) or self.cap is None:
             self.root.after(200, self._loop_camara)
@@ -1402,6 +1464,7 @@ class GuardApp:
                                     live_ok = False
                         if not live_ok and ahora - self._liveness_started_at >= config.LIVENESS_TIMEOUT_SECONDS:
                             self.access_card_state = {"status":"DENEGADO", "name":est.nombre, "matricula":est.matricula, "carrera":"Posible suplantación (foto/pantalla)", "distancia":match.distancia, "confianza":match.confianza_pct, "timer":ahora, "tiempo_acceso":t_acceso, "condicion_luz":condicion_luz}
+                            self._activar_torreta_virtual("ALERTA: POSIBLE SUPLANTACIÓN")
                             if ahora - self.db_cooldown.get("LIVENESS:"+key, 0.0) >= config.ACCESS_LOG_COOLDOWN_SECONDS:
                                 self.db_cooldown["LIVENESS:"+key] = ahora
                                 self.db.log_acceso(estudiante_id=est.id, matricula=est.matricula, nombre=est.nombre+" — Posible suplantación (foto/pantalla)", distancia=match.distancia, estado="DENEGADO", tiempo_acceso_segundos=t_acceso, tipo_usuario="estudiante", condicion_luz=condicion_luz)
@@ -1451,6 +1514,7 @@ class GuardApp:
                             "distancia": match.distancia, "confianza": match.confianza_pct, "timer": ahora,
                             "tiempo_acceso": t_acceso_den, "condicion_luz": condicion_luz
                         }
+                        self._activar_torreta_virtual("ALERTA: ACCESO DENEGADO")
                         last_log = self.db_cooldown.get("UNKNOWN", 0.0)
                         if ahora - last_log >= config.ACCESS_LOG_COOLDOWN_SECONDS:
                             self.db_cooldown["UNKNOWN"] = ahora
@@ -1495,6 +1559,10 @@ class GuardApp:
                     cv2.putText(frame, "Verificando vitalidad: parpadee", (left, max(25, top-10)), cv2.FONT_HERSHEY_SIMPLEX, .55, (0,255,255), 2)
             except Exception as e:
                 print(f"[!] Error al dibujar recuadro facial: {e}")
+
+        # La alerta se dibuja al final para que quede visible sobre el video
+        # sin interferir con la detección ni con los recuadros biométricos.
+        self._dibujar_alerta_manual(frame)
 
         self._renderizar_tarjeta_acceso(ahora)
         self._mostrar_en_label(frame, self.video_label_acceso)
@@ -3300,3 +3368,4 @@ def iniciar_gui():
 
 if __name__ == "__main__":
     iniciar_gui()
+
