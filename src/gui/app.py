@@ -13,6 +13,9 @@ DISEÑO EJECUTIVO Y PROFESIONAL:
 8. Cumplimiento con la LFPDPPP: Cero imágenes en disco, almacenamiento exclusivo de 1024 bytes.
 """
 
+from pathlib import Path
+import winsound
+
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import cv2
@@ -189,6 +192,7 @@ class GuardApp:
 
         # Auditoría y contadores del día
         self.db_cooldown: Dict[str, float] = {}
+        self._persona_desconocida_detectada = False
         self.conteo_autorizados = 0
         self.conteo_denegados = 0
 
@@ -1330,10 +1334,10 @@ class GuardApp:
                 if current_tab == 0:
                     self._procesar_cuadro_acceso(frame)
                 elif current_tab == 1:
+                    self._mostrar_en_label(frame.copy(), self.video_label_registro)
                     self._procesar_cuadro_registro(frame)
             except Exception as e:
                 print(f"[!] Error procesando frame en loop: {e}")
-
         self.root.after(10, self._loop_camara)
 
     def _procesar_cuadro_acceso(self, frame):
@@ -1363,7 +1367,6 @@ class GuardApp:
 
             self._cache_acceso = []
             alguien_reconocido = False
-
             for box, encoding, match in zip(boxes, encodings, matches):
                 if match.reconocido and match.estudiante:
                     alguien_reconocido = True
@@ -1462,6 +1465,15 @@ class GuardApp:
                             self.lbl_count_den.config(text=str(self.conteo_denegados))
         except queue.Empty:
             pass  # sin resultados nuevos, reutilizar caché
+        hay_desconocido = any(
+            d.get("nombre") == "No Registrado"
+            for d in self._cache_acceso
+        )
+
+        if hay_desconocido and not self._persona_desconocida_detectada:
+            winsound.PlaySound(str(Path(__file__).resolve().parents[2] / "alarma_intrusos.wav"), winsound.SND_FILENAME | winsound.SND_ASYNC)
+
+        self._persona_desconocida_detectada = hay_desconocido
 
         if not any(d.get("auth") or d.get("liveness") for d in self._cache_acceso):
             if self._liveness_face_key:

@@ -91,7 +91,7 @@ class ThreadedCamera:
                     continue
 
                 # Intentar primero apertura directa
-                cap = cv2.VideoCapture(idx)
+                cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW) if os.name == "nt" else cv2.VideoCapture(idx)
                 if cap.isOpened():
                     ok, _ = cap.read()
                     if ok:
